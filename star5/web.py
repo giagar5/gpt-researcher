@@ -31,6 +31,40 @@ NO_STORE = {"Cache-Control": "no-store"}
 OUTPUTS = Path("outputs").resolve()
 
 
+BRIEF_PROMPT = """You turn a user's question into a research brief for an autonomous web-research agent.
+The agent plans its sub-queries and writes the final report from this brief alone, so the brief must
+keep the user's real intent and must not drift to side topics.
+
+Write the brief in {language}. Output only the brief: plain text, at most 200 words, these labelled lines:
+Question: the user's question, verbatim.
+Goal: what the user actually wants to obtain.
+Deliverable: the concrete output. When the user asks to find, choose or compare people, professionals,
+  businesses, products, places or services, the deliverable is a shortlist of specific named candidates
+  (aim for 5 to 10 when they exist) with, for each one: name, where and how to contact or book, how it
+  meets each key criterion, and the source; then a reasoned recommendation. Never turn such a request
+  into a general explainer.
+Key criteria: the criteria implied by the question, most important first (for example qualifications,
+  specialisation, methods, experience with the specific problem, location, languages, availability,
+  verifiable reputation).
+Search hints: languages and local terms to search in, place names, useful directories or registries.
+Secondary: topics to cover only briefly at the end, if at all (for example prices, reimbursement or
+  regulation), unless the user asked about them.
+Do not answer the question and do not invent facts."""
+
+
+async def brief(question, language, previous, config_path):
+    from gpt_researcher.config import Config
+    from gpt_researcher.utils.llm import create_chat_completion
+
+    cfg = Config(config_path)
+    user = question if not previous else f"{question}\n\n(This is a follow-up to the earlier question: {previous})"
+    return await create_chat_completion(
+        model=cfg.smart_llm_model, llm_provider=cfg.smart_llm_provider, llm_kwargs=cfg.llm_kwargs,
+        messages=[{"role": "system", "content": BRIEF_PROMPT.format(language=language)},
+                  {"role": "user", "content": user}],
+        temperature=None, max_tokens=cfg.smart_token_limit)
+
+
 async def research(task, report_type, tone, max_results, config_path, sink):
     from gpt_researcher.utils.enum import Tone
     from server.server_utils import generate_report_files, sanitize_filename
@@ -112,7 +146,7 @@ def options(body, default_results):
     return mode, tone, ui, lang, results
 
 
-def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=research, chat_fn=chat):
+def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=research, chat_fn=chat, brief_fn=brief):
     data_dir = Path(data_dir or os.environ.get("STAR5_DATA", "data"))
     base_config = base_config or os.environ.get("CONFIG_PATH")
     configs = language_configs(base_config, data_dir / "configs")
@@ -121,7 +155,7 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     interrupted = store.fail_interrupted()
     if interrupted:
         LOG.warning("Marked %s interrupted Star5 turns as failed", interrupted)
-    runner = Runner(store, research_fn, chat_fn, configs)
+    runner = Runner(store, research_fn, chat_fn, configs, brief_fn=brief_fn)
     router = APIRouter(prefix="/api/s5")
 
     def guard(request: Request):

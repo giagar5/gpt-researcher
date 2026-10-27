@@ -228,6 +228,9 @@
     const when = new Date((turn.finished || turn.created) * 1000);
     meta.append(el("span", "", when.toLocaleString(state.ui, {dateStyle: "medium", timeStyle: "short"})));
     if (turn.started && turn.finished) meta.append(el("span", "", duration(turn.finished - turn.started)));
+    const brief = $(".brief", node), briefText = turn.brief || live.brief || "";
+    brief.hidden = !briefText;
+    $("p", brief).textContent = briefText;
 
     renderProgress(node, turn, live, running);
     const sources = running ? live.sources.map(s => ({...s, cited: false})) : turn.sources || [];
@@ -405,6 +408,7 @@
       switch (event.t) {
         case "status": setTurn(turnId, {status: event.status}); fillStart(turnId); break;
         case "phase": live.phase = event.phase; break;
+        case "brief": live.brief = event.text; setTurn(turnId, {brief: event.text}); break;
         case "queries": live.queries = event.items; break;
         case "query": live.current = event.q; if (!live.queries.includes(event.q)) live.queries.push(event.q); break;
         case "source": if (!live.sources.some(s => s.url === event.url)) live.sources.push({url: event.url, domain: event.domain, title: ""}); break;

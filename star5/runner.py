@@ -156,10 +156,11 @@ class Sink:
 
 class Runner:
     def __init__(self, store, research_fn, chat_fn, configs, clock=time.time,
-                 research_slots=1, chat_slots=2):
+                 research_slots=1, chat_slots=2, brief_fn=None):
         self.store = store
         self.research_fn = research_fn
         self.chat_fn = chat_fn
+        self.brief_fn = brief_fn
         self.configs = configs
         self.clock = clock
         self.jobs = {}
@@ -213,11 +214,22 @@ class Runner:
                 job.cond.notify_all()
 
     async def _research(self, job, turn, config):
-        task = turn["question"]
         previous = [t for t in self.store.history(turn["thread_id"], turn["seq"]) if t["kind"] == "research"]
-        if previous:
+        earlier = previous[-1]["question"] if previous else ""
+        task = turn["question"]
+        if self.brief_fn is not None:
+            try:
+                brief = (await self.brief_fn(turn["question"], LANGS[turn["lang"]], earlier, config)).strip()
+            except Exception:
+                LOG.exception("Research brief failed for %s; using the question as is", job.turn_id)
+                brief = ""
+            if brief:
+                self.store.update_turn(job.turn_id, brief=brief)
+                await job.emit({"t": "brief", "text": brief})
+                task = brief
+        elif earlier:
             task = (f"{turn['question']}\n\nContext: this is a follow-up to the earlier research question "
-                    f"\"{previous[-1]['question']}\".")
+                    f"\"{earlier}\".")
         answer, research_sources, visited, files = await self.research_fn(
             task, MODES[turn["mode"]], turn["tone"], turn["max_results"], config, Sink(job))
         await job.emit({"t": "phase", "phase": "write"})

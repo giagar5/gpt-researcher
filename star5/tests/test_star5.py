@@ -18,13 +18,29 @@ from star5.store import Store
 from star5.web import drop_event_logs, install
 
 H = {"X-Star5": "1"}
+SCHEMA_BEFORE_BRIEF = """
+CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE turns (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL, kind TEXT NOT NULL, question TEXT NOT NULL, mode TEXT NOT NULL, lang TEXT NOT NULL,
+  tone TEXT NOT NULL, max_results INTEGER NOT NULL, status TEXT NOT NULL, answer TEXT NOT NULL DEFAULT '',
+  sources TEXT NOT NULL DEFAULT '[]', files TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+  created REAL NOT NULL, started REAL, finished REAL);
+"""
 
 
 class Fakes:
     def __init__(self):
         self.calls = []
         self.chats = []
+        self.briefs = []
         self.gate = None
+        self.brief_fails = False
+
+    async def brief(self, question, language, previous, config_path):
+        self.briefs.append({"question": question, "language": language, "previous": previous})
+        if self.brief_fails:
+            raise RuntimeError("model unavailable")
+        return f"Question: {question}\nDeliverable: shortlist of named candidates\n"
 
     async def research(self, task, report_type, tone, max_results, config_path, sink):
         self.calls.append({"task": task, "type": report_type, "tone": tone, "max": max_results,
@@ -89,7 +105,7 @@ class Star5Case(unittest.TestCase):
         self.addCleanup(setattr, web, "OUTPUTS", web.OUTPUTS)
         web.OUTPUTS = (Path(self.tmp.name) / "outputs").resolve()
         self.runner = install(self.app, data_dir=Path(self.tmp.name) / "data", base_config=str(base),
-                              research_fn=self.fakes.research, chat_fn=self.fakes.chat)
+                              research_fn=self.fakes.research, chat_fn=self.fakes.chat, brief_fn=self.fakes.brief)
         self.client = TestClient(self.app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
@@ -150,9 +166,13 @@ class ApiTests(Star5Case):
                          ["https://www.sqlite.org/wal.html", "https://example.com/x", "https://other.org/read"])
         self.assertEqual(done["sources"][0]["title"], "Write-Ahead Logging")
         self.assertEqual([s["cited"] for s in done["sources"]], [True, True, False])
-        self.assertEqual(self.fakes.calls[0], {"task": "Spiega in italiano quando usare la modalità WAL di SQLite",
-                                               "type": "detailed_report", "tone": "Critical", "max": 10,
-                                               "lang": "italian"})
+        self.assertEqual(self.fakes.calls[0], {
+            "task": "Question: Spiega in italiano quando usare la modalità WAL di SQLite\n"
+                    "Deliverable: shortlist of named candidates",
+            "type": "detailed_report", "tone": "Critical", "max": 10, "lang": "italian"})
+        self.assertEqual(self.fakes.briefs[0]["language"], "italian")
+        self.assertIn({"t": "brief", "text": self.fakes.calls[0]["task"]}, events)
+        self.assertEqual(done["brief"], self.fakes.calls[0]["task"])
         thread = self.client.get(f"/api/s5/threads/{started['thread']}").json()
         self.assertEqual(thread["turns"][0]["files"], {"md": "outputs/t1.md"})
         listing = self.client.get("/api/s5/threads").json()["threads"]
@@ -200,8 +220,17 @@ class ApiTests(Star5Case):
         follow = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H,
                                   json={"question": "E rispetto a PostgreSQL?", "kind": "research"}).json()
         self.events(follow["turn"])
-        self.assertIn("follow-up", self.fakes.calls[-1]["task"])
-        self.assertIn("SQLite", self.fakes.calls[-1]["task"])
+        self.assertEqual(self.fakes.briefs[-1]["question"], "E rispetto a PostgreSQL?")
+        self.assertIn("SQLite", self.fakes.briefs[-1]["previous"])
+        self.assertIn("PostgreSQL", self.fakes.calls[-1]["task"])
+
+    def test_brief_failure_falls_back_to_question(self):
+        self.fakes.brief_fails = True
+        started = self.start()
+        done = self.events(started["turn"])[-1]["turn"]
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(done["brief"], "")
+        self.assertEqual(self.fakes.calls[-1]["task"], "Spiega in italiano quando usare la modalità WAL di SQLite")
 
     def test_cancel_marks_turn_cancelled(self):
         self.fakes.gate = asyncio.Event()
@@ -249,6 +278,22 @@ class UnitTests(unittest.TestCase):
             self.assertEqual(Store(Path(tmp) / "s.db").fail_interrupted(), 1)
             self.assertEqual(store.turn(turn)["status"], "error")
             self.assertEqual(store.turn(turn)["error"], "interrupted")
+
+    def test_existing_database_gains_brief_column(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            old = sqlite3.connect(path)
+            old.executescript(SCHEMA_BEFORE_BRIEF)
+            old.execute("INSERT INTO threads VALUES ('t','q',1,1)")
+            old.execute("INSERT INTO turns(id,thread_id,seq,kind,question,mode,lang,tone,max_results,status,created)"
+                        " VALUES ('u','t',1,'research','q','quick','it','Objective',8,'done',1)")
+            old.commit()
+            old.close()
+            store = Store(path)
+            self.assertEqual(store.turn("u")["brief"], "")
+            store.update_turn("u", brief="b")
+            self.assertEqual(store.turn("u")["brief"], "b")
 
     def test_normalize_ignores_images_and_unknown(self):
         self.assertEqual(normalize({"type": "images", "output": "[]"}), [])

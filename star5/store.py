@@ -51,6 +51,9 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
+            if "brief" not in columns:
+                conn.execute("ALTER TABLE turns ADD COLUMN brief TEXT NOT NULL DEFAULT ''")
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -95,7 +98,7 @@ class Store:
         return turn_id
 
     def update_turn(self, turn_id, **fields):
-        allowed = {"status", "answer", "sources", "files", "error", "started", "finished", "lang"}
+        allowed = {"status", "answer", "sources", "files", "error", "started", "finished", "lang", "brief"}
         if not fields or set(fields) - allowed:
             raise ValueError("Invalid turn fields")
         values = {k: json.dumps(v, ensure_ascii=False) if k in ("sources", "files") else v
