@@ -65,9 +65,16 @@
       <form id="ask" class="composer big" autocomplete="off">
         <label class="sr" for="q" data-i18n="placeholder"></label>
         <textarea id="q" rows="2" maxlength="2000" data-i18n-ph="placeholder" required></textarea>
+        <div class="attach-list" hidden></div>
         <div class="composer-bar">
           <div class="seg" role="radiogroup" id="modes" data-i18n-aria="mode"></div>
           <div class="bar-right">
+            <div class="tools">
+              <button type="button" class="tool" data-act="attach" data-i18n-title="attach"></button>
+              <button type="button" class="tool" data-act="record" data-i18n-title="record"></button>
+              <button type="button" class="tool" data-act="locate" data-i18n-title="locate"></button>
+              <input type="file" class="picker" multiple hidden>
+            </div>
             <button type="button" class="chip" id="optBtn" aria-expanded="false" aria-controls="opts">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
               <span data-i18n="options"></span>
@@ -99,11 +106,20 @@
       <form id="follow" class="composer follow" autocomplete="off">
         <label class="sr" for="fq" data-i18n="followPh"></label>
         <textarea id="fq" rows="1" maxlength="2000" data-i18n-ph="followPh" required></textarea>
+        <div class="attach-list" hidden></div>
         <div class="composer-bar">
           <div class="seg small" role="radiogroup" id="kinds"></div>
-          <button type="submit" class="send" data-i18n-title="send">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
-          </button>
+          <div class="bar-right">
+            <div class="tools">
+              <button type="button" class="tool" data-act="attach" data-i18n-title="attach"></button>
+              <button type="button" class="tool" data-act="record" data-i18n-title="record"></button>
+              <button type="button" class="tool" data-act="locate" data-i18n-title="locate"></button>
+              <input type="file" class="picker" multiple hidden>
+            </div>
+            <button type="submit" class="send" data-i18n-title="send">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </button>
+          </div>
         </div>
       </form>
     </section>
@@ -119,6 +135,7 @@
   <article class="turn">
     <h2 class="q"></h2>
     <div class="meta"></div>
+    <div class="att-row" hidden></div>
     <details class="brief" hidden><summary data-i18n="brief"></summary><p></p></details>
     <div class="progress" hidden>
       <ol class="steps"></ol>

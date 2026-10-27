@@ -45,16 +45,38 @@ class Fakes:
         self.briefs = []
         self.gate = None
         self.brief_fails = False
+        self.media = []
+        self.media_gate = None
+        self.media_fails = False
+        self.geocoded = []
 
-    async def brief(self, question, language, previous, config_path):
-        self.briefs.append({"question": question, "language": language, "previous": previous})
+    async def brief(self, question, language, previous, config_path, extra=""):
+        self.briefs.append({"question": question, "language": language, "previous": previous, "extra": extra})
         if self.brief_fails:
             raise RuntimeError("model unavailable")
         return f"Question: {question}\nDeliverable: shortlist of named candidates\n"
 
-    async def research(self, task, report_type, tone, max_results, config_path, sink):
+    async def process_media(self, upload, source, out_dir, config_path):
+        self.media.append({"name": upload["name"], "kind": upload["kind"], "bytes": Path(source).read_bytes(),
+                           "lang": json.loads(Path(config_path).read_text())["LANGUAGE"]})
+        if self.media_gate is not None:
+            await self.media_gate.wait()
+        await fake_model_call(700, 70)
+        if self.media_fails:
+            raise RuntimeError("cannot decode")
+        (Path(out_dir) / "thumb.jpg").write_bytes(b"JPEG")
+        return {"text": f"Contenuto di {upload['name']}: un mulino a vento a Wavre.", "summary": "un mulino",
+                "meta": {"width": 10}, "thumb": True}
+
+    async def geocode(self, lat, lon, lang):
+        self.geocoded.append((lat, lon, lang))
+        return "Aisémont, Wavre, Brabant wallon, Belgio"
+
+    async def research(self, task, report_type, tone, max_results, config_path, sink, doc_path=None):
         self.calls.append({"task": task, "type": report_type, "tone": tone, "max": max_results,
                            "lang": json.loads(Path(config_path).read_text())["LANGUAGE"]})
+        if doc_path is not None:
+            self.calls[-1]["docs"] = {p.name: p.read_text() for p in sorted(Path(doc_path).iterdir())}
         await sink.send_json({"type": "logs", "content": "subqueries", "output": "plan",
                               "metadata": ["query uno", "query due"]})
         await sink.send_json({"type": "logs", "content": "running_subquery_research",
@@ -119,7 +141,10 @@ class Star5Case(unittest.TestCase):
         self.addCleanup(setattr, web, "OUTPUTS", web.OUTPUTS)
         web.OUTPUTS = (Path(self.tmp.name) / "outputs").resolve()
         self.runner = install(self.app, data_dir=Path(self.tmp.name) / "data", base_config=str(base),
-                              research_fn=self.fakes.research, chat_fn=self.fakes.chat, brief_fn=self.fakes.brief)
+                              research_fn=self.fakes.research, chat_fn=self.fakes.chat, brief_fn=self.fakes.brief,
+                              media_fn=self.fakes.process_media, geocode_fn=self.fakes.geocode)
+        self.uploads = self.app.state.star5_uploads
+        self.data = Path(self.tmp.name) / "data"
         self.runner.tick_every = 0.02
         self.client = TestClient(self.app)
         self.client.__enter__()
@@ -142,6 +167,305 @@ class Star5Case(unittest.TestCase):
         response = self.client.post("/api/s5/threads", headers=H, json={"question": question, **extra})
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
+
+    def upload(self, name="mulino.jpg", data=b"x" * 10, mime="image/jpeg", chunk=4, complete=True):
+        created = self.client.post("/api/s5/uploads", headers=H,
+                                   json={"name": name, "size": len(data), "mime": mime, "ui": "fr"})
+        self.assertEqual(created.status_code, 200, created.text)
+        upload_id = created.json()["id"]
+        for offset in range(0, len(data), chunk):
+            part = data[offset:offset + chunk]
+            response = self.client.put(f"/api/s5/uploads/{upload_id}?offset={offset}", content=part,
+                                       headers={**H, "Content-Type": "application/octet-stream"})
+            self.assertEqual(response.status_code, 200, response.text)
+        if complete:
+            response = self.client.post(f"/api/s5/uploads/{upload_id}/complete", headers=H)
+            self.assertEqual(response.status_code, 200, response.text)
+        return upload_id
+
+    def wait_upload(self, upload_id, timeout=5):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            state = self.client.get(f"/api/s5/uploads/{upload_id}").json()
+            if state["state"] in ("ready", "error"):
+                return state
+            time.sleep(0.05)
+        self.fail("upload not processed")
+
+
+class AttachmentTests(Star5Case):
+    def test_chunked_upload_processed_attached_and_used_by_research(self):
+        data = bytes(range(256)) * 5
+        upload_id = self.upload(data=data, chunk=300)
+        state = self.wait_upload(upload_id)
+        self.assertEqual((state["state"], state["kind"], state["summary"], state["thumb"]), ("ready", "image", "un mulino", True))
+        self.assertEqual(self.fakes.media[0]["bytes"], data)
+        self.assertEqual(self.fakes.media[0]["lang"], "french")
+        started = self.start("Che mulino è questo e dove si trova?", attachments=[upload_id],
+                             location={"lat": 50.71712, "lon": 4.61234, "accuracy": 35.4, "label": "Wavre"})
+        events = self.events(started["turn"])
+        phases = [e["phase"] for e in events if e["t"] == "phase"]
+        self.assertEqual(phases[:2], ["files", "plan"])
+        self.assertIn({"t": "files", "done": 1, "total": 1}, events)
+        done = events[-1]["turn"]
+        self.assertEqual(done["attachments"], [{"id": upload_id, "kind": "image", "name": "mulino.jpg", "size": len(data)}])
+        self.assertEqual(done["location"], {"lat": 50.7171, "lon": 4.6123, "accuracy": 35, "label": "Wavre"})
+        extra = self.fakes.briefs[-1]["extra"]
+        self.assertIn("un mulino a vento a Wavre", extra)
+        self.assertIn("Wavre (latitude 50.717, longitude 4.612, accuracy about 35 m)", extra)
+        docs = self.fakes.calls[-1]["docs"]
+        self.assertEqual(list(docs), ["01-mulino.jpg.txt"])
+        self.assertIn("Attached by the user: image \"mulino.jpg\"", docs["01-mulino.jpg.txt"])
+        self.assertFalse((self.data / "turn-docs" / started["turn"]).exists(), "turn documents not cleaned up")
+        self.assertEqual((done["tokens_in"], done["tokens_out"], done["llm_calls"]), (2200, 370, 3))
+        thumb = self.client.get(f"/api/s5/uploads/{upload_id}/thumb")
+        self.assertEqual((thumb.status_code, thumb.content), (200, b"JPEG"))
+        original = self.client.get(f"/api/s5/uploads/{upload_id}/file")
+        self.assertEqual(original.content, data)
+        self.assertEqual(original.headers["content-type"], "application/octet-stream")
+        self.assertIn("attachment", original.headers["content-disposition"])
+        self.assertIn("sandbox", original.headers["content-security-policy"])
+        self.assertEqual(self.client.delete(f"/api/s5/uploads/{upload_id}", headers=H).status_code, 409)
+        self.client.delete(f"/api/s5/threads/{started['thread']}", headers=H)
+        self.assertFalse((self.data / "uploads" / upload_id).exists())
+        self.assertEqual(self.client.get(f"/api/s5/uploads/{upload_id}").status_code, 404)
+
+    def test_research_waits_for_attachments_still_processing(self):
+        self.fakes.media_gate = asyncio.Event()
+        upload_id = self.upload(name="nota.m4a", mime="audio/mp4")
+        started = self.start("Riassumi questa nota vocale", attachments=[upload_id])
+        time.sleep(0.3)
+        self.assertEqual(self.fakes.calls, [], "research started before the attachment was ready")
+        self.assertEqual(self.client.get(f"/api/s5/uploads/{upload_id}").json()["state"], "processing")
+        self.client.portal.call(self.fakes.media_gate.set)
+        done = self.events(started["turn"])[-1]["turn"]
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(len(self.fakes.calls), 1)
+
+    def test_failed_attachment_does_not_block_and_is_reported(self):
+        self.fakes.media_fails = True
+        self.fakes.media_gate = asyncio.Event()
+        upload_id = self.upload(name="rotto.mp4", mime="video/mp4")
+        started = self.start("Cosa mostra questo video?", attachments=[upload_id])
+        self.client.portal.call(self.fakes.media_gate.set)
+        done = self.events(started["turn"])[-1]["turn"]
+        self.assertEqual(done["status"], "done")
+        self.assertEqual(self.client.get(f"/api/s5/uploads/{upload_id}").json()["state"], "error")
+        self.assertIn("could not be read", self.fakes.briefs[-1]["extra"])
+        self.assertNotIn("docs", self.fakes.calls[-1])
+        late = self.upload(name="rotto2.mp4", mime="video/mp4")
+        self.assertEqual(self.wait_upload(late)["state"], "error")
+        refused = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H,
+                                   json={"question": "e questo?", "attachments": [late]})
+        self.assertEqual(refused.status_code, 409, "an upload that already failed must not be attachable")
+
+    def test_chat_follow_up_gets_full_attachment_text_and_location(self):
+        started = self.start()
+        self.events(started["turn"])
+        upload_id = self.upload(name="preventivo.pdf", mime="application/pdf")
+        self.wait_upload(upload_id)
+        turn = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H, json={
+            "question": "È conveniente?", "kind": "chat", "attachments": [upload_id],
+            "location": {"lat": 50.7, "lon": 4.6, "accuracy": 20}}).json()
+        self.assertEqual(self.events(turn["turn"])[-1]["turn"]["status"], "done")
+        message = self.fakes.chats[-1]["messages"][-1]["content"]
+        self.assertIn("Contenuto di preventivo.pdf", message)
+        self.assertIn("The user's current location: unknown area", message)
+
+    def test_upload_validation(self):
+        def create(**body):
+            return self.client.post("/api/s5/uploads", headers=H, json={"name": "a.jpg", "size": 10, "mime": "", **body})
+        self.assertEqual(create(name="virus.exe").status_code, 415)
+        self.assertEqual(create(name="disegno.svg").status_code, 415)
+        self.assertEqual(create(size=0).status_code, 400)
+        self.assertEqual(create(size="10").status_code, 400)
+        too_big = create(size=41 * 1024 * 1024)
+        self.assertEqual((too_big.status_code, too_big.json()["detail"]), (413, "too_large:40"))
+        self.assertEqual(self.client.post("/api/s5/uploads", json={"name": "a.jpg", "size": 1}).status_code, 403)
+        self.assertEqual(create(name="registrazione.webm", mime="audio/webm").json()["kind"], "audio")
+        self.assertEqual(create(name="clip.webm", mime="video/webm").json()["kind"], "video")
+        upload_id = create().json()["id"]
+        put = lambda offset, data: self.client.put(f"/api/s5/uploads/{upload_id}?offset={offset}", content=data,
+                                                   headers={**H, "Content-Type": "application/octet-stream"})
+        self.assertEqual(put(0, b"12345").status_code, 200)
+        self.assertEqual(put(0, b"12345").status_code, 409)
+        self.assertEqual(put(5, b"123456").status_code, 409)
+        self.assertEqual(self.client.post(f"/api/s5/uploads/{upload_id}/complete", headers=H).status_code, 409)
+        self.assertEqual(self.client.put(f"/api/s5/uploads/{upload_id}?offset=5", content=b"x" * (4 * 1024 * 1024 + 1),
+                                         headers=H).status_code, 413)
+        bad = self.client.post("/api/s5/threads", headers=H, json={"question": "q", "attachments": [upload_id]})
+        self.assertEqual(bad.status_code, 409, "an upload still uploading must not be attachable")
+        self.assertEqual(self.client.get("/api/s5/threads").json()["threads"], [], "failed thread left behind")
+        for attachments in (["../etc"], "x", [upload_id, upload_id], ["0" * 16] * 11):
+            self.assertEqual(self.client.post("/api/s5/threads", headers=H,
+                                              json={"question": "q", "attachments": attachments}).status_code, 400)
+        self.assertEqual(self.client.delete(f"/api/s5/uploads/{upload_id}", headers=H).status_code, 200)
+        self.assertFalse((self.data / "uploads" / upload_id).exists())
+
+    def test_attachment_cannot_be_reused(self):
+        upload_id = self.upload()
+        self.wait_upload(upload_id)
+        first = self.start(attachments=[upload_id])
+        self.events(first["turn"])
+        again = self.client.post("/api/s5/threads", headers=H, json={"question": "q", "attachments": [upload_id]})
+        self.assertEqual(again.status_code, 409)
+
+    def test_geocode_and_location_validation(self):
+        response = self.client.post("/api/s5/geocode", headers=H, json={"lat": 50.71712, "lon": 4.61234, "accuracy": 12.6, "ui": "it"})
+        self.assertEqual(response.json(), {"lat": 50.7171, "lon": 4.6123, "accuracy": 13,
+                                           "label": "Aisémont, Wavre, Brabant wallon, Belgio"})
+        self.assertEqual(self.fakes.geocoded, [(50.7171, 4.6123, "it")])
+        for body in ({"lat": 91, "lon": 0}, {"lat": "50", "lon": 4}, {"lat": 50, "lon": 4, "accuracy": -1}, []):
+            self.assertEqual(self.client.post("/api/s5/geocode", headers=H, json=body).status_code, 400, body)
+            if isinstance(body, dict):
+                self.assertEqual(self.client.post("/api/s5/threads", headers=H,
+                                                  json={"question": "q", "location": body}).status_code, 400)
+
+    def test_sweep_removes_stale_unattached_uploads_and_orphans(self):
+        upload_id = self.upload(complete=False)
+        orphan = self.data / "uploads" / "0123456789abcdef"
+        orphan.mkdir()
+        self.uploads.clock = lambda: time.time() + 25 * 3600
+        self.assertEqual(self.uploads.sweep(), 2)
+        self.assertFalse((self.data / "uploads" / upload_id).exists())
+        self.assertFalse(orphan.exists())
+        self.assertEqual(self.client.get(f"/api/s5/uploads/{upload_id}").status_code, 404)
+
+
+class MediaTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.prompts = []
+
+    async def model(self, config_path, prompt, images=()):
+        self.prompts.append((prompt, [Path(p).name for p in images]))
+        return "DESCRIZIONE"
+
+    def run_process(self, kind, ext, worker_result, source=None):
+        from star5 import media
+
+        async def worker(command, src, out):
+            self.assertEqual(command, kind)
+            for name in worker_result.get("images", []):
+                (out / name).write_bytes(b"JPEG")
+            return worker_result
+
+        upload = {"kind": kind, "ext": ext, "lang": "fr", "name": f"f.{ext}"}
+        return asyncio.run(media.process(upload, source or self.tmp / f"f.{ext}", self.tmp, "cfg", worker, self.model))
+
+    def test_image_video_audio(self):
+        image = self.run_process("image", "jpg", {"images": ["image.jpg"], "thumb": "thumb.jpg", "width": 9})
+        self.assertEqual((image["text"], image["thumb"], image["meta"]), ("DESCRIZIONE", True, {"width": 9}))
+        self.assertIn("in French", self.prompts[-1][0])
+        video = self.run_process("video", "mp4", {"images": ["frame00.jpg", "frame01.jpg"], "thumb": "thumb.jpg",
+                                                  "duration": 12, "transcript": "[00:01] bonjour", "language": "fr"})
+        self.assertEqual(self.prompts[-1][1], ["frame00.jpg", "frame01.jpg"])
+        self.assertIn("bonjour", self.prompts[-1][0])
+        self.assertIn("Transcript of the audio:\n[00:01] bonjour", video["text"])
+        audio = self.run_process("audio", "m4a", {"transcript": "[00:00] ciao", "duration": 3, "truncated": False})
+        self.assertEqual((audio["text"], audio["meta"]["duration"]), ("[00:00] ciao", 3))
+
+    def test_pdf_text_and_scanned_pdf(self):
+        import pymupdf
+        text_pdf, scanned = self.tmp / "t.pdf", self.tmp / "s.pdf"
+        with pymupdf.open() as doc:
+            for n in range(2):
+                doc.new_page().insert_text((72, 72), f"Pagina {n + 1}: " + "contenuto del preventivo " * 20)
+            doc.save(text_pdf)
+        with pymupdf.open() as doc:
+            page = doc.new_page()
+            page.draw_rect(pymupdf.Rect(50, 50, 300, 300), color=(0, 0, 0), fill=(0.5, 0.5, 0.5))
+            doc.save(scanned)
+        result = self.run_process("document", "pdf", {}, text_pdf)
+        self.assertIn("[page 2]\nPagina 2", result["text"])
+        self.assertEqual(result["meta"], {"pages": 2})
+        self.assertEqual(self.prompts, [])
+        result = self.run_process("document", "pdf", {}, scanned)
+        self.assertEqual((result["text"], result["meta"]["ocr"]), ("DESCRIZIONE", True))
+        self.assertEqual(self.prompts[-1][1], ["page01.jpg"])
+
+    def test_office_epub_html_and_text_documents(self):
+        import zipfile
+        import docx
+        from pptx import Presentation
+        from pptx.util import Inches
+        document = docx.Document()
+        document.add_heading("Verbale", 1)
+        document.add_paragraph("Gita al museo il 14 novembre.")
+        table = document.add_table(rows=1, cols=2)
+        table.rows[0].cells[0].text, table.rows[0].cells[1].text = "Quota", "18 euro"
+        document.save(self.tmp / "v.docx")
+        deck = Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[5])
+        slide.shapes.title.text = "Budget 2027"
+        slide.shapes.add_textbox(Inches(1), Inches(2), Inches(4), Inches(1)).text_frame.text = "Totale 42.000"
+        deck.save(self.tmp / "d.pptx")
+        with zipfile.ZipFile(self.tmp / "s.xlsx", "w") as z:
+            z.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+                       'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'
+                       '<sheet name="Spese" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/'
+                       '2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>')
+            z.writestr("xl/sharedStrings.xml", '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                       '<si><t>Voce</t></si><si><t>Affitto</t></si></sst>')
+            z.writestr("xl/worksheets/sheet1.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/'
+                       '2006/main"><sheetData><row><c t="s"><v>0</v></c><c t="inlineStr"><is><t>Euro</t></is></c></row>'
+                       '<row><c t="s"><v>1</v></c><c><v>850</v></c></row></sheetData></worksheet>')
+        with zipfile.ZipFile(self.tmp / "b.epub", "w") as z:
+            z.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/c.opf"/>'
+                       '</rootfiles></container>')
+            z.writestr("OEBPS/c.opf", '<package xmlns="http://www.idpf.org/2007/opf"><manifest>'
+                       '<item id="a" href="a.xhtml"/><item id="b" href="b.xhtml"/></manifest>'
+                       '<spine><itemref idref="b"/><itemref idref="a"/></spine></package>')
+            z.writestr("OEBPS/a.xhtml", "<html><body><p>Capitolo due</p></body></html>")
+            z.writestr("OEBPS/b.xhtml", "<html><body><p>Capitolo uno</p><script>x()</script></body></html>")
+        (self.tmp / "p.html").write_text("<html><style>p{}</style><body><h1>Titolo</h1><p>Testo</p></body></html>")
+        (self.tmp / "n.txt").write_bytes("Città d'arte".encode("cp1252"))
+        results = {name: self.run_process("document", name.split(".")[1], {}, self.tmp / name)["text"]
+                   for name in ("v.docx", "d.pptx", "s.xlsx", "b.epub", "p.html", "n.txt")}
+        self.assertEqual(results["v.docx"], "Verbale\nGita al museo il 14 novembre.\nQuota | 18 euro")
+        self.assertIn("[slide 1]\nBudget 2027\nTotale 42.000", results["d.pptx"])
+        self.assertEqual(results["s.xlsx"], "[sheet Spese]\nVoce | Euro\nAffitto | 850")
+        self.assertEqual(results["b.epub"], "Capitolo uno\n\nCapitolo due")
+        self.assertEqual(results["p.html"], "Titolo\nTesto")
+        self.assertEqual(results["n.txt"], "Città d'arte")
+        with self.assertRaises(ValueError):
+            self.run_process("document", "exe", {}, self.tmp / "n.txt")
+
+    def test_summary_skips_markdown(self):
+        from star5.media import first_line
+        self.assertEqual(first_line("**Descrizione dell'immagine**\n\nUna **farmacia** a Bergamo.\n- Orari"),
+                         "Una farmacia a Bergamo. Orari")
+        self.assertEqual(first_line("Il video mostra un gatto marmorizzato in una foresta tropicale.\n\n"
+                                    "**Contenuto visivo**\n- foglie"),
+                         "Il video mostra un gatto marmorizzato in una foresta tropicale.")
+        self.assertEqual(first_line("## Video\nUn gatto."), "Un gatto.")
+        self.assertEqual(first_line("[00:00] ciao file_name"), "[00:00] ciao file_name")
+
+    def test_classify_and_names(self):
+        from star5.media import classify, clean_name
+        self.assertEqual(classify("IMG_1.HEIC", ""), ("image", "heic"))
+        self.assertEqual(classify("a.webm", "audio/webm"), ("audio", "webm"))
+        self.assertEqual(classify("a.webm", ""), ("video", "webm"))
+        self.assertEqual(classify("a.svg", "image/svg+xml"), (None, "svg"))
+        self.assertEqual(clean_name("../../etc/pass\x00wd"), "passwd")
+
+    def test_geocoder_label_cache_and_rate_limit(self):
+        from star5.media import Geocoder
+        calls, clock = [], [100.0]
+
+        async def fetch(lat, lon, lang):
+            calls.append((lat, lon, lang, clock[0]))
+            return {"address": {"road": "Rue X", "house_number": "3", "neighbourhood": "Aisémont", "town": "Wavre",
+                                "state": "Brabant wallon", "country": "Belgique"}}
+
+        geocoder = Geocoder(fetch, clock=lambda: clock[0])
+        label = asyncio.run(geocoder(50.71712, 4.61234, "fr"))
+        self.assertEqual(label, "Aisémont, Wavre, Brabant wallon, Belgique")
+        self.assertEqual(calls[0][:2], (50.717, 4.612), "coordinates must be rounded before leaving the server")
+        asyncio.run(geocoder(50.71749, 4.61201, "fr"))
+        self.assertEqual(len(calls), 1, "same area must come from the cache")
 
 
 class ApiTests(Star5Case):

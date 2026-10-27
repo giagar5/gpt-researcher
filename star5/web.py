@@ -5,10 +5,12 @@ downloads under /outputs stay. Authentication stays in front of the app (nginx a
 the owners' Google login).
 """
 
+import asyncio
 import json
 import logging
 import os
 import re
+import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,13 +22,18 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount
 
+from .media import Geocoder, process as process_media
 from .runner import LANGS, MODES, MAX_QUESTION, TONES, UI_LANGS, Runner, detect_lang, language_configs
 from .store import Store
+from .uploads import Uploads, clean_location
+
+MAX_ATTACHMENTS = 10
 
 LOG = logging.getLogger("star5")
 STATIC = Path(__file__).resolve().parent / "static"
-CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-       "font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")
+CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
+       "font-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
+       "object-src 'none'")
 NO_STORE = {"Cache-Control": "no-store"}
 OUTPUTS = Path("outputs").resolve()
 
@@ -51,15 +58,22 @@ Secondary: topics the agent must NOT research separately (for example prices, re
   regulation, unless the user asked about them); the report mentions them only in one short closing
   paragraph, using what it found anyway.
 Report shape: the deliverable comes first and is the largest part; background and method take a few lines.
+Attachments: when the user attached files, add a line "Attachments:" stating what they show or contain
+  (key facts, exact text, product names) and how they relate to the question. When the question refers to
+  them ("what is this", "find this", "this document"), they are the subject of the research.
+Location: when the user's location is given, use the place name for anything local ("near me", "here",
+  "around"), and name the town and region in the Search hints. Never include the coordinates.
 Do not answer the question and do not invent facts."""
 
 
-async def brief(question, language, previous, config_path):
+async def brief(question, language, previous, config_path, extra=""):
     from gpt_researcher.config import Config
     from gpt_researcher.utils.llm import create_chat_completion
 
     cfg = Config(config_path)
     user = question if not previous else f"{question}\n\n(This is a follow-up to the earlier question: {previous})"
+    if extra:
+        user += f"\n\n{extra}"
     return await create_chat_completion(
         model=cfg.smart_llm_model, llm_provider=cfg.smart_llm_provider, llm_kwargs=cfg.llm_kwargs,
         messages=[{"role": "system", "content": BRIEF_PROMPT.format(language=language)},
@@ -67,15 +81,28 @@ async def brief(question, language, previous, config_path):
         temperature=None, max_tokens=cfg.smart_token_limit)
 
 
-async def research(task, report_type, tone, max_results, config_path, sink):
+def hybrid_config(config_path, doc_path):
+    """Copy of the language config whose DOC_PATH is this turn's attachments folder."""
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    config["DOC_PATH"] = str(doc_path)
+    target = Path(doc_path).with_suffix(".json")
+    target.write_text(json.dumps(config), encoding="utf-8")
+    return str(target)
+
+
+async def research(task, report_type, tone, max_results, config_path, sink, doc_path=None):
     from gpt_researcher.utils.enum import Tone
     from server.server_utils import generate_report_files, sanitize_filename
     from server.websocket_manager import run_agent
 
+    source = "web"
+    # Deep research always searches the web only (upstream); attachments reach it through the brief.
+    if doc_path and report_type != "deep":
+        source, config_path = "hybrid", hybrid_config(config_path, doc_path)
     started = time.time()
     try:
         report, researcher = await run_agent(
-            task, report_type, "web", [], [], Tone[tone], sink, headers={}, query_domains=[],
+            task, report_type, source, [], [], Tone[tone], sink, headers={}, query_domains=[],
             config_path=config_path, return_researcher=True, max_search_results=max_results)
     finally:
         drop_event_logs(sanitize_filename(f"task_0_{task}").rsplit("_", 1)[-1], started)
@@ -148,7 +175,8 @@ def options(body, default_results):
     return mode, tone, ui, lang, results
 
 
-def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=research, chat_fn=chat, brief_fn=brief):
+def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=research, chat_fn=chat, brief_fn=brief,
+            media_fn=process_media, geocode_fn=None):
     data_dir = Path(data_dir or os.environ.get("STAR5_DATA", "data"))
     base_config = base_config or os.environ.get("CONFIG_PATH")
     configs = language_configs(base_config, data_dir / "configs")
@@ -157,7 +185,10 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     interrupted = store.fail_interrupted()
     if interrupted:
         LOG.warning("Marked %s interrupted Star5 turns as failed", interrupted)
-    runner = Runner(store, research_fn, chat_fn, configs, brief_fn=brief_fn)
+    uploads = Uploads(store, data_dir / "uploads", media_fn, lambda lang: configs.get(lang, configs["it"]))
+    docs_root = data_dir / "turn-docs"
+    shutil.rmtree(docs_root, ignore_errors=True)
+    runner = Runner(store, research_fn, chat_fn, configs, brief_fn=brief_fn, uploads=uploads, docs_root=docs_root)
     router = APIRouter(prefix="/api/s5")
 
     def guard(request: Request):
@@ -174,10 +205,22 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
             raise HTTPException(400, "json")
         return body
 
-    def begin(thread_id, kind, question, mode, tone, ui, lang, results):
+    def extras(body):
+        ids = body.get("attachments") or []
+        if not isinstance(ids, list) or len(ids) > MAX_ATTACHMENTS or len(set(map(str, ids))) != len(ids) \
+                or not all(isinstance(i, str) and re.fullmatch(r"[0-9a-f]{16}", i) for i in ids):
+            raise HTTPException(400, "attachments")
+        location = clean_location(body["location"]) if body.get("location") else None
+        return ids, location
+
+    def begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments=(), location=None):
         language = detect_lang(question, ui) if lang == "auto" else lang
-        turn_id = store.add_turn(thread_id, kind=kind, question=question, mode=mode if kind == "research" else "chat",
-                                 lang=language, tone=tone, max_results=results)
+        try:
+            turn_id = store.add_turn(thread_id, kind=kind, question=question,
+                                     mode=mode if kind == "research" else "chat", lang=language, tone=tone,
+                                     max_results=results, attachments=attachments, location=location)
+        except ValueError:
+            raise HTTPException(409, "attachments")
         runner.start(turn_id)
         return {"thread": thread_id, "turn": turn_id, "lang": language}
 
@@ -196,8 +239,13 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         body = await body_of(request)
         question = clean_question(body.get("question"))
         mode, tone, ui, lang, results = options(body, default_results)
+        attachments, location = extras(body)
         thread_id = store.create_thread(question)
-        return begin(thread_id, "research", question, mode, tone, ui, lang, results)
+        try:
+            return begin(thread_id, "research", question, mode, tone, ui, lang, results, attachments, location)
+        except HTTPException:
+            store.delete_thread(thread_id)
+            raise
 
     @router.get("/threads/{thread_id}")
     async def thread(thread_id: str):
@@ -215,9 +263,10 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         if kind not in ("chat", "research"):
             raise HTTPException(400, "kind")
         mode, tone, ui, lang, results = options(body, default_results)
+        attachments, location = extras(body)
         if store.thread(thread_id) is None:
             raise HTTPException(404, "thread")
-        return begin(thread_id, kind, question, mode, tone, ui, lang, results)
+        return begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments, location)
 
     @router.delete("/threads/{thread_id}")
     async def delete(thread_id: str, request: Request):
@@ -227,7 +276,8 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
             raise HTTPException(404, "thread")
         for turn in found["turns"]:
             runner.cancel(turn["id"])
-        _, files = store.delete_thread(thread_id)
+        _, files, upload_ids = store.delete_thread(thread_id)
+        uploads.remove(upload_ids)
         for group in files:
             for name in group.values():
                 path = (Path.cwd() / unquote(str(name))).resolve()
@@ -261,6 +311,7 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={**NO_STORE, "X-Accel-Buffering": "no"})
 
+    uploads.install(router, guard, UI_LANGS, geocode_fn or Geocoder())
     before = list(app.router.routes)
     app.include_router(router)
     own = [r for r in app.router.routes if not any(r is b for b in before)]
@@ -301,9 +352,26 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     async def lifespan(application):
         async with upstream_lifespan(application) as state:
             prune()
-            yield state
+            uploads.resume()
+
+            async def housekeeping():
+                while True:
+                    try:
+                        removed = uploads.sweep()
+                        if removed:
+                            LOG.info("Removed %s stale attachments", removed)
+                    except Exception:
+                        LOG.exception("Attachment cleanup failed")
+                    await asyncio.sleep(3600)
+
+            sweeper = asyncio.create_task(housekeeping())
+            try:
+                yield state
+            finally:
+                sweeper.cancel()
 
     app.router.lifespan_context = lifespan
     prune()
     app.state.star5 = runner
+    app.state.star5_uploads = uploads
     return runner

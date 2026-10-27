@@ -4,10 +4,12 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .media import attachment_context, location_text
 from .tokens import metered
 
 LOG = logging.getLogger("star5")
@@ -31,7 +33,7 @@ PHASES = {
               "draft_sections_generated", "introduction_written", "conclusion_written",
               "fetching_relevant_written_content"},
 }
-PHASE_ORDER = ("plan", "search", "read", "write")
+PHASE_ORDER = ("files", "plan", "search", "read", "write")
 URL = re.compile(r"https?://[^\s<>\"')\]]+")
 QUOTED = re.compile(r"'(.+)'")
 
@@ -100,7 +102,7 @@ def normalize(data):
     output = str(data.get("output") or "").strip()
     events = []
     for phase in PHASE_ORDER:
-        if key in PHASES[phase]:
+        if key in PHASES.get(phase, ()):
             events.append({"t": "phase", "phase": phase})
             break
     if key == "subqueries" and isinstance(data.get("metadata"), list):
@@ -158,11 +160,13 @@ class Sink:
 
 class Runner:
     def __init__(self, store, research_fn, chat_fn, configs, clock=time.time,
-                 research_slots=1, chat_slots=2, brief_fn=None):
+                 research_slots=1, chat_slots=2, brief_fn=None, uploads=None, docs_root=None):
         self.store = store
         self.research_fn = research_fn
         self.chat_fn = chat_fn
         self.brief_fn = brief_fn
+        self.uploads = uploads
+        self.docs_root = Path(docs_root) if docs_root else None
         self.configs = configs
         self.clock = clock
         self.jobs = {}
@@ -192,17 +196,21 @@ class Runner:
         turn = self.store.turn(job.turn_id)
         status, fields = "error", {}
         with metered() as meter:
-            ticker = asyncio.create_task(self._tick(job, meter, self.tick_every))
+            extra = {"tokens_in": 0, "tokens_out": 0, "llm_calls": 0}
+            ticker = asyncio.create_task(self._tick(job, meter, self.tick_every, extra))
             try:
                 async with self.slots[turn["kind"]]:
                     self.store.update_turn(job.turn_id, status="running", started=self.clock())
                     await job.emit({"t": "status", "status": "running"})
                     config = self.configs[turn["lang"]]
+                    context = await self._context(job, turn)
+                    if self.uploads is not None and turn["attachments"]:
+                        extra.update(self.uploads.tokens(job.turn_id))
                     if turn["kind"] == "chat":
-                        fields = await self._chat(turn, config)
+                        fields = await self._chat(turn, config, context)
                     else:
                         await job.emit({"t": "phase", "phase": "plan"})
-                        fields = await self._research(job, turn, config)
+                        fields = await self._research(job, turn, config, context)
                     status = "done"
             except asyncio.CancelledError:
                 status, fields = "cancelled", {"error": "cancelled"}
@@ -211,8 +219,12 @@ class Runner:
                 status, fields = "error", {"error": f"{type(error).__name__}: {error}"[:500]}
             finally:
                 ticker.cancel()
-                self.store.update_turn(job.turn_id, status=status, finished=self.clock(),
-                                       **fields, **meter.snapshot())
+                if self.docs_root is not None:
+                    shutil.rmtree(self.docs_root / job.turn_id, ignore_errors=True)
+                    (self.docs_root / f"{job.turn_id}.json").unlink(missing_ok=True)
+                used = meter.snapshot()
+                self.store.update_turn(job.turn_id, status=status, finished=self.clock(), **fields,
+                                       **{key: used[key] + extra[key] for key in used})
                 final = self.store.turn(job.turn_id)
                 async with job.cond:
                     job.events.append({"t": "done", "turn": final})
@@ -220,39 +232,75 @@ class Runner:
                     job.finished_at = self.clock()
                     job.cond.notify_all()
 
-    async def _tick(self, job, meter, every=3):
+    async def _tick(self, job, meter, every=3, extra=None):
         """Live token counter while the job runs: one event whenever the totals change."""
         last = None
         while True:
             await asyncio.sleep(every)
             current = meter.snapshot()
+            if extra:
+                current = {key: current[key] + extra[key] for key in current}
             if current != last and current["llm_calls"]:
                 last = current
                 await job.emit({"t": "tokens", **current})
 
-    async def _research(self, job, turn, config):
+    async def _context(self, job, turn):
+        """Waits for the turn's attachments; returns their text, the location and a folder of documents."""
+        uploads = []
+        if self.uploads is not None and turn["attachments"]:
+            await job.emit({"t": "phase", "phase": "files"})
+
+            async def progress(done, total):
+                await job.emit({"t": "files", "done": done, "total": total})
+
+            uploads = await self.uploads.wait(job.turn_id, progress)
+        docs = None
+        ready = [u for u in uploads if u["state"] == "ready" and u["chars"]]
+        if ready and self.docs_root is not None:
+            docs = self.docs_root / job.turn_id
+            docs.mkdir(parents=True, exist_ok=True)
+            for index, upload in enumerate(ready):
+                name = re.sub(r"[^\w.-]+", "_", upload["name"])[:80]
+                (docs / f"{index + 1:02d}-{name}.txt").write_text(
+                    f"Attached by the user: {upload['kind']} \"{upload['name']}\"\n\n" + self.uploads.text(upload["id"]),
+                    encoding="utf-8")
+        return {
+            "attachments": attachment_context(uploads, self.uploads.text) if uploads else "",
+            "location": location_text(turn["location"]),
+            "docs": docs,
+            "full": "\n\n".join(f"[{u['kind']} \"{u['name']}\"]\n{self.uploads.text(u['id'])}" for u in ready),
+        }
+
+    @staticmethod
+    def _extra(context):
+        return "\n\n".join(part for part in (context["attachments"], context["location"]) if part)
+
+    async def _research(self, job, turn, config, context):
         previous = [t for t in self.store.history(turn["thread_id"], turn["seq"]) if t["kind"] == "research"]
         earlier = previous[-1]["question"] if previous else ""
+        extra = self._extra(context)
         task = turn["question"]
+        brief = ""
         if self.brief_fn is not None:
             try:
-                brief = (await self.brief_fn(turn["question"], LANGS[turn["lang"]], earlier, config)).strip()
+                brief = (await self.brief_fn(turn["question"], LANGS[turn["lang"]], earlier, config, extra)).strip()
             except Exception:
                 LOG.exception("Research brief failed for %s; using the question as is", job.turn_id)
-                brief = ""
             if brief:
                 self.store.update_turn(job.turn_id, brief=brief)
                 await job.emit({"t": "brief", "text": brief})
                 task = brief
-        elif earlier:
-            task = (f"{turn['question']}\n\nContext: this is a follow-up to the earlier research question "
-                    f"\"{earlier}\".")
+        if not brief:
+            if earlier:
+                task = (f"{task}\n\nContext: this is a follow-up to the earlier research question \"{earlier}\".")
+            if extra:
+                task = f"{task}\n\n{extra[:4000]}"
         answer, research_sources, visited, files = await self.research_fn(
-            task, MODES[turn["mode"]], turn["tone"], turn["max_results"], config, Sink(job))
+            task, MODES[turn["mode"]], turn["tone"], turn["max_results"], config, Sink(job), context["docs"])
         await job.emit({"t": "phase", "phase": "write"})
         return {"answer": answer, "sources": build_sources(answer, research_sources, visited), "files": files}
 
-    async def _chat(self, turn, config):
+    async def _chat(self, turn, config, context):
         history = self.store.history(turn["thread_id"], turn["seq"])
         report = next((t["answer"] for t in reversed(history) if t["kind"] == "research" and t["answer"]), "")
         messages = []
@@ -261,7 +309,12 @@ class Runner:
                 messages += [{"role": "user", "content": item["question"]},
                              {"role": "assistant", "content": item["answer"]}]
         language = LANGS.get(turn["lang"], "italian")
-        messages.append({"role": "user", "content": f"{turn['question']}\n\n(Answer in {language}.)"})
+        content = turn["question"]
+        if context["full"]:
+            content += f"\n\nFiles attached to this message (their content, as text):\n{context['full'][:40000]}"
+        if context["location"]:
+            content += f"\n\n{context['location']}"
+        messages.append({"role": "user", "content": f"{content}\n\n(Answer in {language}.)"})
         answer, searched = await self.chat_fn(report, messages, config)
         return {"answer": answer, "sources": build_sources(answer, searched, [])}
 

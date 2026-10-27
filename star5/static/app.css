@@ -93,6 +93,7 @@ button{cursor:pointer}
   font-size:17px;line-height:1.5;max-height:40vh}
 .composer.big textarea{min-height:56px}
 .composer-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;flex-wrap:wrap}
+.follow .composer-bar .bar-right{gap:4px}
 .bar-right{display:flex;align-items:center;gap:6px;margin-left:auto}
 .seg{display:inline-flex;gap:2px;padding:3px;border-radius:999px;background:var(--cp-surface-soft);flex-wrap:wrap}
 .seg button{border:0;background:transparent;padding:6px 12px;border-radius:999px;font-size:14px;color:var(--cp-text-muted);
@@ -108,6 +109,41 @@ button{cursor:pointer}
   background:var(--cp-accent);color:var(--cp-accent-fg)}
 .send:hover{background:var(--cp-accent-hover)}
 .send:disabled{opacity:.45;cursor:default}
+.tools{display:inline-flex;gap:2px}
+.tool{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;border:0;
+  background:transparent;color:var(--cp-text-muted)}
+.tool:hover{background:var(--cp-surface-soft);color:var(--cp-text)}
+.tool.on{color:var(--cp-accent);background:var(--cp-accent-soft)}
+.tool.rec{color:var(--cp-accent-fg);background:var(--cp-danger);animation:pulse 1.4s ease-in-out infinite}
+.tool svg{width:19px;height:19px}
+.composer.drop{border-color:var(--cp-accent);box-shadow:0 0 0 3px var(--cp-accent-soft)}
+.attach-list{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 2px}
+.att-chip{position:relative;display:inline-flex;align-items:center;gap:8px;max-width:260px;padding:4px 6px 4px 6px;
+  border-radius:10px;border:1px solid var(--cp-border);background:var(--cp-bg-elevated);overflow:hidden}
+.att-chip svg{width:18px;height:18px;color:var(--cp-text-muted);margin:0 3px}
+.att-chip .thumb,.att .thumb{width:32px;height:32px;border-radius:6px;object-fit:cover;flex:none}
+.att-text{display:flex;flex-direction:column;min-width:0;line-height:1.25}
+.att-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att-status{font-size:11px;color:var(--cp-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.att-chip.error{border-color:var(--cp-danger)}
+.att-chip.error .att-status{color:var(--cp-danger)}
+.att-chip.processing .att-status::before{content:"";display:inline-block;width:8px;height:8px;margin-right:5px;border-radius:50%;
+  border:2px solid var(--cp-accent);border-right-color:transparent;animation:spin .9s linear infinite;vertical-align:-1px}
+.att-chip.recording{border-color:var(--cp-danger)}
+.att-chip.loc.ready svg{color:var(--cp-accent)}
+.att-chip.loc{max-width:100%}
+.att-chip.loc .att-name{white-space:normal}
+.att-bar{position:absolute;left:0;bottom:0;height:3px;background:var(--cp-accent);transition:width .2s}
+.att-x{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border:0;border-radius:50%;
+  background:transparent;color:var(--cp-text-muted);flex:none}
+.att-x:hover{background:var(--cp-surface-soft);color:var(--cp-text)}
+.att-x svg{width:14px;height:14px;margin:0}
+.att-row{display:flex;flex-wrap:wrap;gap:6px;margin:-6px 0 14px}
+.att{display:inline-flex;align-items:center;gap:8px;max-width:280px;padding:4px 10px 4px 4px;border-radius:10px;
+  border:1px solid var(--cp-border);background:var(--cp-surface);color:var(--cp-text);text-decoration:none;font-size:13px}
+.att:hover{border-color:var(--cp-border-strong)}
+.att svg{width:18px;height:18px;color:var(--cp-text-muted);margin:0 4px}
+.att.loc svg{color:var(--cp-accent)}
 .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:12px 0 4px;padding-top:12px;
   border-top:1px solid var(--cp-border)}
 .opts label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--cp-text-muted)}
@@ -245,5 +281,7 @@ button{cursor:pointer}
   .follow{margin-left:-14px;margin-right:-14px;width:calc(100% + 28px);max-width:none;border-radius:20px 20px 0 0}
   .cards{grid-auto-columns:minmax(170px,72%)}
   .seg button{padding:6px 10px}
+  .att-chip{max-width:calc(100vw - 60px)}
+  .tool{width:34px;height:34px}
 }
 @media print{.side,.mtop,.follow,.actions,.progress,.cancel{display:none !important}.shell{display:block}}

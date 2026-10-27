@@ -15,6 +15,15 @@
     bolt: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
     layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/>',
     dive: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4M11 8v6M8 11h6"/>',
+    clip: '<path d="M21 11l-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
+    pin: '<path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 8"/>',
+    video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/>',
+    audio: '<path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2"/>',
+    document: '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 13h6M9 17h6"/>',
+    x: '<path d="M7 7l10 10M17 7L7 17"/>',
   };
   const icon = name => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("aria-hidden", "true"); s.innerHTML = ICON[name]; return s; };
 
@@ -46,7 +55,11 @@
         credentials: "same-origin", redirect: "manual", cache: "no-store"});
     } catch (error) { banner(T.offline); throw error; }
     if (res.type === "opaqueredirect" || res.status === 401 || res.status === 302) { expired(); throw new Error("expired"); }
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      let detail = "";
+      try { detail = (await res.json()).detail || ""; } catch { /* not JSON */ }
+      throw Object.assign(new Error(`HTTP ${res.status}`), {status: res.status, detail: String(detail)});
+    }
     return res.json();
   }
   function banner(text, link) {
@@ -76,6 +89,7 @@
     hint();
     renderLibrary();
     renderRecent();
+    state.homeComposer?.render(); state.followComposer?.render();
     if (state.thread) renderThread();
   }
   function hint() { $("#modeHint").textContent = T.modeHints[state.mode]; }
@@ -237,6 +251,7 @@
       meta.append(chip);
     }
     const brief = $(".brief", node), briefText = turn.brief || live.brief || "";
+    renderAttachments($(".att-row", node), turn);
     brief.hidden = !briefText;
     $("p", brief).textContent = briefText;
 
@@ -275,16 +290,19 @@
     const box = $(".progress", node); box.hidden = !running;
     if (!running) return;
     const steps = $(".steps", box); steps.replaceChildren();
-    const order = turn.kind === "chat" ? ["chat"] : ["plan", "search", "read", "write"];
-    const at = turn.status === "queued" ? -1 : turn.kind === "chat" ? 0 : Math.max(0, order.indexOf(live.phase || "plan"));
+    const order = [...(turn.attachments || []).length ? ["files"] : [],
+      ...(turn.kind === "chat" ? ["chat"] : ["plan", "search", "read", "write"])];
+    let at = turn.status === "queued" ? -1 : Math.max(0, order.indexOf(live.phase || order[0]));
+    if (live.phase === "files" && live.files && live.files.done === live.files.total) at += 1;
     if (turn.status === "queued") steps.append(Object.assign(el("li", "on", T.status.queued)));
     order.forEach((p, i) => {
       const li = el("li", i < at ? "ok" : i === at ? "on" : "", p === "chat" ? T.chatPhase : T.phases[p]);
+      if (p === "files" && live.files) li.append(el("span", "n", ` · ${live.files.done}/${live.files.total}`));
       if (p === "search" && live.queries.length) li.append(el("span", "n", ` · ${live.queries.length} ${T.queries}`));
       if (p === "read" && live.sources.length) li.append(el("span", "n", ` · ${T.sourcesN(live.sources.length)}`));
       steps.append(li);
     });
-    const q = $(".queries", box); q.hidden = !live.queries.length || at > 2;
+    const q = $(".queries", box); q.hidden = !live.queries.length || order[at] === "write";
     q.replaceChildren(...live.queries.slice(0, 8).map(text => el("li", text === live.current ? "on" : "", text)));
     const elapsed = $(".elapsed", box); elapsed.dataset.start = String(turn.started || turn.created);
     tick(elapsed);
@@ -438,6 +456,7 @@
         case "query": live.current = event.q; if (!live.queries.includes(event.q)) live.queries.push(event.q); break;
         case "source": if (!live.sources.some(s => s.url === event.url)) live.sources.push({url: event.url, domain: event.domain, title: ""}); break;
         case "chunk": live.text += event.text; break;
+        case "files": live.files = {done: event.done, total: event.total}; break;
         case "log": live.logs.push(event.text); break;
         case "done":
           source.close(); state.streams.delete(turnId); state.live.delete(turnId);
@@ -469,27 +488,240 @@
     renderTotal();
   }
 
-  /* ---------- asking ---------- */
-  function payload(question, kind, mode) {
-    return {question, kind, mode: mode || state.mode, ui: state.ui, lang: state.lang, tone: state.tone, max_results: state.sites};
+  /* ---------- attachments and location ---------- */
+  const ACCEPT = ["image/*", "video/*", "audio/*", ".heic", ".heif", ".pdf", ".docx", ".pptx", ".xlsx", ".csv",
+    ".txt", ".md", ".html", ".htm", ".epub", ".m4a", ".opus", ".amr", ".mkv"].join(",");
+  const MAX_ATTACH = 10, MAX_RECORD = 30 * 60;
+  const size = n => n >= 1048576 ? `${(n / 1048576).toFixed(n >= 10485760 ? 0 : 1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+  function kindOf(file) {
+    const t = file.type || "";
+    return t.startsWith("image/") || /\.(heic|heif)$/i.test(file.name) ? "image" : t.startsWith("video/") ? "video"
+      : t.startsWith("audio/") ? "audio" : "document";
   }
-  async function ask(question, kind, mode) {
-    if (!state.thread) return;
+  function uploadError(error) {
+    if (error.status === 413 && error.detail.startsWith("too_large:")) return T.tooLarge(error.detail.split(":")[1]);
+    if (error.status === 415) return T.unsupported;
+    if (error.status === 507) return T.storage;
+    return T.uploadFailed;
+  }
+  function locLabel(loc) {
+    return `${loc.label || T.here} (±${loc.accuracy < 1000 ? `${loc.accuracy} m` : `${(loc.accuracy / 1000).toFixed(1)} km`})`;
+  }
+
+  function makeComposer(form) {
+    const c = {form, items: [], location: null, locating: false, recorder: null, list: $(".attach-list", form)};
+    const picker = $(".picker", form), button = act => $(`.tool[data-act="${act}"]`, form);
+    picker.accept = ACCEPT;
+
+    c.render = () => {
+      c.list.replaceChildren();
+      c.items.forEach(item => {
+        const chip = el("div", `att-chip ${item.state}`);
+        if (item.preview) { const img = el("img", "thumb"); img.src = item.preview; img.alt = ""; chip.append(img); }
+        else chip.append(icon(item.kind));
+        const text = el("span", "att-text");
+        text.append(el("span", "att-name", item.name));
+        const status = item.state === "recording" ? `${T.recording} ${duration(item.seconds || 0)}`
+          : item.state === "uploading" ? `${T.uploading} ${Math.floor(item.progress * 100)}%`
+          : item.state === "processing" ? T.processingAtt : item.state === "error" ? item.error : size(item.size);
+        text.append(el("span", "att-status", status));
+        chip.append(text);
+        if (item.state === "uploading") { const bar = el("span", "att-bar"); bar.style.width = `${Math.round(item.progress * 100)}%`; chip.append(bar); }
+        chip.title = item.state === "error" ? `${item.name}: ${item.error}` : item.name;
+        if (item.state !== "recording") {
+          const x = el("button", "att-x"); x.type = "button"; x.title = T.removeAtt; x.setAttribute("aria-label", T.removeAtt);
+          x.append(icon("x")); x.addEventListener("click", () => c.remove(item)); chip.append(x);
+        }
+        c.list.append(chip);
+      });
+      if (c.locating || c.location || c.locError) {
+        const chip = el("div", `att-chip loc ${c.locating ? "processing" : c.locError ? "error" : "ready"}`);
+        chip.append(icon("pin"));
+        const text = el("span", "att-text");
+        text.append(el("span", "att-name", c.locating ? T.locating : c.locError || locLabel(c.location)));
+        chip.append(text);
+        if (!c.locating) {
+          const x = el("button", "att-x"); x.type = "button"; x.title = T.removeLocation; x.setAttribute("aria-label", T.removeLocation);
+          x.append(icon("x")); x.addEventListener("click", () => { c.location = null; c.locError = ""; c.render(); }); chip.append(x);
+        }
+        c.list.append(chip);
+      }
+      c.list.hidden = !c.list.childElementCount;
+      button("record").classList.toggle("rec", !!c.recorder);
+      button("record").replaceChildren(icon(c.recorder ? "stop" : "mic"));
+      button("record").title = c.recorder ? T.stopRecord : T.record;
+      button("locate").classList.toggle("on", !!c.location);
+    };
+
+    c.add = files => {
+      for (const file of files) {
+        if (c.items.length >= MAX_ATTACH) { banner(T.tooMany(MAX_ATTACH)); break; }
+        const item = {key: Math.random().toString(36).slice(2), file, name: file.name || "file", size: file.size,
+          kind: kindOf(file), state: "uploading", progress: 0, abort: new AbortController()};
+        if (item.kind === "image" && /^image\/(jpeg|png|webp|gif)$/.test(file.type)) item.preview = URL.createObjectURL(file);
+        c.items.push(item);
+        upload(item);
+      }
+      c.render();
+    };
+
+    async function upload(item) {
+      try {
+        const init = await api("/api/s5/uploads", {method: "POST",
+          body: {name: item.name, size: item.size, mime: item.file.type || "", ui: state.ui}});
+        item.id = init.id; item.kind = init.kind;
+        for (let offset = 0; offset < item.size; offset += init.chunk) {
+          if (!c.items.includes(item)) return;
+          const res = await fetch(`/api/s5/uploads/${item.id}?offset=${offset}`, {method: "PUT",
+            body: item.file.slice(offset, offset + init.chunk), signal: item.abort.signal, credentials: "same-origin",
+            redirect: "manual", headers: {"X-Star5": "1", "Content-Type": "application/octet-stream"}});
+          if (res.type === "opaqueredirect" || res.status === 401) { expired(); throw new Error("expired"); }
+          if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), {status: res.status, detail: ""});
+          item.progress = Math.min(1, (offset + init.chunk) / item.size); c.render();
+        }
+        const done = await api(`/api/s5/uploads/${item.id}/complete`, {method: "POST"});
+        item.state = done.state === "ready" ? "ready" : done.state === "error" ? "error" : "processing";
+        item.error = done.error; c.render();
+        poll(item);
+      } catch (error) {
+        if (error.name === "AbortError" || !c.items.includes(item)) return;
+        item.state = "error"; item.error = uploadError(error); c.render();
+      }
+    }
+
+    async function poll(item) {
+      while (item.state === "processing" && c.items.includes(item)) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const s = await api(`/api/s5/uploads/${item.id}`);
+          if (s.state === "ready" || s.state === "error") { item.state = s.state; item.error = s.error ? T.processFailed : ""; c.render(); }
+        } catch { return; }
+      }
+    }
+
+    c.remove = item => {
+      c.items = c.items.filter(i => i !== item);
+      item.abort.abort();
+      if (item.preview) URL.revokeObjectURL(item.preview);
+      if (item.id) api(`/api/s5/uploads/${item.id}`, {method: "DELETE"}).catch(() => {});
+      c.render();
+    };
+
+    c.toggleRecord = async () => {
+      if (c.recorder) { c.recorder.stop(); return; }
+      if (!window.MediaRecorder || !navigator.mediaDevices) { banner(T.micDenied); return; }
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
+      catch { banner(T.micDenied); return; }
+      const mime = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find(m => MediaRecorder.isTypeSupported(m)) || "";
+      const recorder = new MediaRecorder(stream, mime ? {mimeType: mime} : undefined);
+      const chunks = [], started = Date.now();
+      const item = {key: "rec", name: T.recording, kind: "audio", state: "recording", seconds: 0, abort: new AbortController()};
+      c.items.push(item); c.recorder = recorder;
+      const timer = setInterval(() => {
+        item.seconds = (Date.now() - started) / 1000; c.render();
+        if (item.seconds >= MAX_RECORD) recorder.stop();
+      }, 1000);
+      recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => {
+        clearInterval(timer); stream.getTracks().forEach(t => t.stop());
+        c.recorder = null; c.items = c.items.filter(i => i !== item);
+        const type = (recorder.mimeType || mime || "audio/webm").split(";")[0];
+        const ext = type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
+        const stamp = new Date().toTimeString().slice(0, 5).replace(":", "");
+        if (chunks.length) c.add([new File(chunks, `${T.recordingFile}-${stamp}.${ext}`, {type})]);
+        else c.render();
+      };
+      recorder.start(1000);
+      c.render();
+    };
+
+    c.toggleLocation = () => {
+      if (c.location || c.locError) { c.location = null; c.locError = ""; c.render(); return; }
+      if (!navigator.geolocation) { c.locError = T.locUnavailable; c.render(); return; }
+      c.locating = true; c.render();
+      navigator.geolocation.getCurrentPosition(async pos => {
+        const loc = {lat: pos.coords.latitude, lon: pos.coords.longitude, accuracy: Math.round(pos.coords.accuracy || 0)};
+        try { Object.assign(loc, await api("/api/s5/geocode", {method: "POST", body: {...loc, ui: state.ui}})); }
+        catch { loc.label = ""; }
+        c.locating = false; c.location = loc; c.render();
+      }, error => {
+        c.locating = false;
+        c.locError = error.code === 1 ? T.locDenied : error.code === 3 ? T.locTimeout : T.locUnavailable;
+        c.render();
+      }, {enableHighAccuracy: true, timeout: 20000, maximumAge: 60000});
+    };
+
+    c.busy = () => c.items.some(i => i.state === "uploading" || i.state === "recording") || c.locating;
+    c.extras = () => ({
+      attachments: c.items.filter(i => i.id && (i.state === "processing" || i.state === "ready")).map(i => i.id),
+      location: c.location ? {lat: c.location.lat, lon: c.location.lon, accuracy: c.location.accuracy, label: c.location.label || ""} : null,
+    });
+    c.reset = () => {
+      c.items.forEach(i => { if (i.preview) URL.revokeObjectURL(i.preview); });
+      c.items = []; c.location = null; c.locError = ""; c.render();
+    };
+
+    button("attach").addEventListener("click", () => picker.click());
+    picker.addEventListener("change", () => { c.add([...picker.files]); picker.value = ""; });
+    button("record").addEventListener("click", c.toggleRecord);
+    button("locate").addEventListener("click", c.toggleLocation);
+    form.addEventListener("dragover", e => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); form.classList.add("drop"); } });
+    form.addEventListener("dragleave", () => form.classList.remove("drop"));
+    form.addEventListener("drop", e => { if (e.dataTransfer?.files.length) { e.preventDefault(); form.classList.remove("drop"); c.add([...e.dataTransfer.files]); } });
+    form.addEventListener("paste", e => { if (e.clipboardData?.files.length) { e.preventDefault(); c.add([...e.clipboardData.files]); } });
+    button("attach").append(icon("clip")); button("locate").append(icon("pin"));
+    c.render();
+    return c;
+  }
+
+  function renderAttachments(row, turn) {
+    row.replaceChildren();
+    (turn.attachments || []).forEach(a => {
+      const link = el("a", "att"); link.href = `/api/s5/uploads/${a.id}/file`; link.title = `${a.name} · ${size(a.size)}`;
+      if (a.kind === "image" || a.kind === "video") {
+        const img = el("img", "thumb"); img.alt = ""; img.loading = "lazy"; img.src = `/api/s5/uploads/${a.id}/thumb`;
+        img.addEventListener("error", () => img.replaceWith(icon(a.kind)), {once: true});
+        link.append(img);
+      } else link.append(icon(a.kind));
+      link.append(el("span", "att-name", a.name));
+      row.append(link);
+    });
+    if (turn.location) {
+      const loc = turn.location, link = el("a", "att loc");
+      link.href = `https://www.openstreetmap.org/?mlat=${loc.lat}&mlon=${loc.lon}#map=15/${loc.lat}/${loc.lon}`;
+      link.target = "_blank"; link.rel = "noopener noreferrer"; link.title = T.openMap;
+      link.append(icon("pin"), el("span", "att-name", locLabel(loc)));
+      row.append(link);
+    }
+    row.hidden = !row.childElementCount;
+  }
+
+  /* ---------- asking ---------- */
+  function payload(question, kind, mode, composer) {
+    return {question, kind, mode: mode || state.mode, ui: state.ui, lang: state.lang, tone: state.tone,
+      max_results: state.sites, ...(composer ? composer.extras() : {})};
+  }
+  async function ask(question, kind, mode, composer) {
+    if (!state.thread) return false;
     try {
-      const started = await api(`/api/s5/threads/${state.thread.id}/turns`, {method: "POST", body: payload(question, kind, mode)});
+      const started = await api(`/api/s5/threads/${state.thread.id}/turns`, {method: "POST", body: payload(question, kind, mode, composer)});
+      if (composer) composer.reset();
       state.thread = await api(`/api/s5/threads/${state.thread.id}`);
       renderThread(); follow(started.turn);
       document.querySelector(`.turn[data-id="${started.turn}"]`)?.scrollIntoView({behavior: "smooth", block: "start"});
       loadLibrary();
-    } catch (error) { if (error.message !== "expired") banner(T.genericError); }
+      return true;
+    } catch (error) { if (error.message !== "expired") banner(T.genericError); return false; }
   }
   async function submitHome(event) {
     event.preventDefault();
     const q = $("#q"), question = q.value.trim(); if (!question) return;
+    if (state.homeComposer.busy()) { banner(T.waitUploads); return; }
     const button = $("#ask .send"); button.disabled = true;
     try {
-      const started = await api("/api/s5/threads", {method: "POST", body: payload(question, "research")});
-      q.value = ""; autosize(q);
+      const started = await api("/api/s5/threads", {method: "POST", body: payload(question, "research", null, state.homeComposer)});
+      q.value = ""; autosize(q); state.homeComposer.reset(); $("#banner").hidden = true;
       location.hash = `#/t/${started.thread}`;
       loadLibrary();
     } catch (error) { if (error.message !== "expired") banner(T.genericError); }
@@ -498,8 +730,10 @@
   async function submitFollow(event) {
     event.preventDefault();
     const f = $("#fq"), question = f.value.trim(); if (!question) return;
-    f.value = ""; autosize(f);
-    await ask(question, state.kind, state.kind === "research" ? state.mode : "quick");
+    if (state.followComposer.busy()) { banner(T.waitUploads); return; }
+    if (await ask(question, state.kind, state.kind === "research" ? state.mode : "quick", state.followComposer)) {
+      f.value = ""; autosize(f); $("#banner").hidden = true;
+    }
   }
   function autosize(t) { t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, window.innerHeight * 0.4)}px`; }
   function enterSubmits(t, form) {
@@ -511,6 +745,8 @@
 
   /* ---------- wiring ---------- */
   function init() {
+    state.homeComposer = makeComposer($("#ask"));
+    state.followComposer = makeComposer($("#follow"));
     $("#ask").addEventListener("submit", submitHome);
     $("#follow").addEventListener("submit", submitFollow);
     enterSubmits($("#q"), $("#ask")); enterSubmits($("#fq"), $("#follow"));
