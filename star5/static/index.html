@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Star5 Search</title>
+<link rel="icon" href="/s5/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/s5/app.css">
+<script src="/site/vendor/js/showdown.min.js" defer></script>
+<script src="/site/vendor/js/purify.min.js" defer></script>
+<script src="/s5/i18n.js" defer></script>
+<script src="/s5/app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside id="side" class="side" aria-label="Menu">
+    <div class="side-head">
+      <a class="brand" href="#/"><span class="logo" aria-hidden="true">S5</span><span>Star5 <b>Search</b></span></a>
+      <button type="button" class="icon-btn only-mobile" id="sideClose" data-i18n-title="close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <a class="new-btn" href="#/" id="newBtn">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      <span data-i18n="new"></span>
+    </a>
+    <div class="lib-head">
+      <span data-i18n="library"></span>
+    </div>
+    <label class="lib-search">
+      <span class="sr" data-i18n="searchLib"></span>
+      <input type="search" id="libFilter" autocomplete="off" data-i18n-ph="searchLib">
+    </label>
+    <nav id="lib" class="lib" aria-live="polite"></nav>
+    <div class="side-foot">
+      <label class="ui-lang">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+        <span class="sr" data-i18n="uiLanguage"></span>
+        <select id="uiLang">
+          <option value="it">Italiano</option>
+          <option value="fr">Français</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <a class="classic" href="/site/index.html" data-i18n="classic"></a>
+    </div>
+  </aside>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <div class="main">
+    <header class="mtop only-mobile">
+      <button type="button" class="icon-btn" id="menuBtn" data-i18n-title="menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <a class="brand" href="#/"><span class="logo" aria-hidden="true">S5</span><span>Star5 <b>Search</b></span></a>
+      <a class="icon-btn" href="#/" data-i18n-title="new">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </a>
+    </header>
+
+    <div id="banner" class="banner" role="alert" hidden></div>
+
+    <section id="home" class="home" hidden>
+      <h1 data-i18n="hero"></h1>
+      <form id="ask" class="composer big" autocomplete="off">
+        <label class="sr" for="q" data-i18n="placeholder"></label>
+        <textarea id="q" rows="2" maxlength="2000" data-i18n-ph="placeholder" required></textarea>
+        <div class="composer-bar">
+          <div class="seg" role="radiogroup" id="modes" data-i18n-aria="mode"></div>
+          <div class="bar-right">
+            <button type="button" class="chip" id="optBtn" aria-expanded="false" aria-controls="opts">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+              <span data-i18n="options"></span>
+            </button>
+            <button type="submit" class="send" data-i18n-title="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="opts" class="opts" hidden>
+          <label><span data-i18n="answerLang"></span>
+            <select id="lang"></select></label>
+          <label><span data-i18n="tone"></span>
+            <select id="tone"></select></label>
+          <label><span data-i18n="sites"></span>
+            <span class="range"><input type="range" id="sites" min="3" max="15" step="1"><output id="sitesOut"></output></span></label>
+        </div>
+      </form>
+      <p class="mode-hint" id="modeHint"></p>
+      <div class="recent" id="recentBox">
+        <div class="recent-h"><span id="recentTitle"></span><button type="button" class="link-btn" id="recentAll" hidden></button></div>
+        <div class="recent-list" id="recent"></div>
+      </div>
+    </section>
+
+    <section id="thread" class="thread" hidden>
+      <div id="turns"></div>
+      <form id="follow" class="composer follow" autocomplete="off">
+        <label class="sr" for="fq" data-i18n="followPh"></label>
+        <textarea id="fq" rows="1" maxlength="2000" data-i18n-ph="followPh" required></textarea>
+        <div class="composer-bar">
+          <div class="seg small" role="radiogroup" id="kinds"></div>
+          <button type="submit" class="send" data-i18n-title="send">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <section id="missing" class="home" hidden>
+      <h1 data-i18n="notFound"></h1>
+      <p><a href="#/" data-i18n="new"></a></p>
+    </section>
+  </div>
+</div>
+
+<template id="turnTpl">
+  <article class="turn">
+    <h2 class="q"></h2>
+    <div class="meta"></div>
+    <div class="progress" hidden>
+      <ol class="steps"></ol>
+      <ul class="queries" hidden></ul>
+      <div class="prog-foot">
+        <span class="elapsed"></span>
+        <button type="button" class="link-btn cancel" data-i18n="cancel"></button>
+      </div>
+      <details class="log" hidden><summary data-i18n="details"></summary><ol></ol></details>
+    </div>
+    <div class="sources" hidden>
+      <div class="sec-h"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/></svg><span class="src-title"></span>
+        <button type="button" class="link-btn all" hidden></button></div>
+      <div class="cards"></div>
+      <div class="grouped" hidden></div>
+    </div>
+    <div class="answer-wrap" hidden>
+      <div class="sec-h"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.4 5.6L20 11l-5.6 2.4L12 19l-2.4-5.6L4 11l5.6-2.4z"/></svg><span data-i18n="answer"></span></div>
+      <details class="toc" hidden><summary data-i18n="toc"></summary><ol></ol></details>
+      <div class="answer md"></div>
+    </div>
+    <div class="failed" hidden></div>
+    <div class="actions" hidden></div>
+  </article>
+</template>
+</body>
+</html>

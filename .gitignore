@@ -62,3 +62,6 @@ CURSOR_RULES.md
 
 # Local context filter benchmark inputs (scraped pages)
 /evals/context_filter/runs/
+
+# Star5: research threads database and per-language configs
+/data/
