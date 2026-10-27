@@ -310,8 +310,21 @@ class Runner:
                              {"role": "assistant", "content": item["answer"]}]
         language = LANGS.get(turn["lang"], "italian")
         content = turn["question"]
-        if context["full"]:
-            content += f"\n\nFiles attached to this message (their content, as text):\n{context['full'][:40000]}"
+        current = context["full"][:40000]
+        if current:
+            content += f"\n\nFiles attached to this message (their content, as text):\n{current}"
+        earlier = []
+        if self.uploads is not None:
+            for item in history:
+                for attachment in item.get("attachments") or []:
+                    text = self.uploads.text(attachment["id"])
+                    if text:
+                        earlier.append(f"[{attachment['kind']} \"{attachment['name']}\"]\n{text}")
+        if earlier:
+            # The report only summarises earlier attachments: give the model their full text as well.
+            room = min(40000, 60000 - len(current))
+            content += ("\n\nFiles attached earlier in this conversation (their content, as text):\n"
+                        + "\n\n".join(earlier)[:room])
         if context["location"]:
             content += f"\n\n{context['location']}"
         messages.append({"role": "user", "content": f"{content}\n\n(Answer in {language}.)"})

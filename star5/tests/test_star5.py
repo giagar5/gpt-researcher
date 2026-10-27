@@ -272,6 +272,19 @@ class AttachmentTests(Star5Case):
         self.assertIn("Contenuto di preventivo.pdf", message)
         self.assertIn("The user's current location: unknown area", message)
 
+    def test_chat_follow_up_sees_files_attached_to_earlier_turns(self):
+        upload_id = self.upload(name="regolamento.pdf", mime="application/pdf")
+        self.wait_upload(upload_id)
+        started = self.start("Riassumi il regolamento allegato", attachments=[upload_id])
+        self.events(started["turn"])
+        turn = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H, json={
+            "question": "Cosa dice esattamente l'articolo 3?", "kind": "chat"}).json()
+        self.assertEqual(self.events(turn["turn"])[-1]["turn"]["status"], "done")
+        message = self.fakes.chats[-1]["messages"][-1]["content"]
+        self.assertIn("Files attached earlier in this conversation", message)
+        self.assertIn("Contenuto di regolamento.pdf", message)
+        self.assertNotIn("Files attached to this message", message)
+
     def test_upload_validation(self):
         def create(**body):
             return self.client.post("/api/s5/uploads", headers=H, json={"name": "a.jpg", "size": 10, "mime": "", **body})
