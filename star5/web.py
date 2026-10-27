@@ -22,6 +22,7 @@ from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount
 
+from .effort import EFFORTS, install as install_effort
 from .media import Geocoder, process as process_media
 from .runner import LANGS, MODES, MAX_QUESTION, TONES, UI_LANGS, Runner, detect_lang, language_configs
 from .store import Store
@@ -175,10 +176,19 @@ def options(body, default_results):
     return mode, tone, ui, lang, results
 
 
+def effort_option(body):
+    """"" (or absent) = the model's default; otherwise one of EFFORTS."""
+    effort = body.get("effort") or ""
+    if effort and effort not in EFFORTS:
+        raise HTTPException(400, "effort")
+    return effort
+
+
 def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=research, chat_fn=chat, brief_fn=brief,
             media_fn=process_media, geocode_fn=None):
     data_dir = Path(data_dir or os.environ.get("STAR5_DATA", "data"))
     base_config = base_config or os.environ.get("CONFIG_PATH")
+    install_effort()
     configs = language_configs(base_config, data_dir / "configs")
     default_results = json.loads(Path(base_config).read_text(encoding="utf-8")).get("MAX_SEARCH_RESULTS_PER_QUERY", 8)
     store = Store(data_dir / "star5.db")
@@ -213,12 +223,13 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         location = clean_location(body["location"]) if body.get("location") else None
         return ids, location
 
-    def begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments=(), location=None):
+    def begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments=(), location=None, effort=""):
         language = detect_lang(question, ui) if lang == "auto" else lang
         try:
             turn_id = store.add_turn(thread_id, kind=kind, question=question,
                                      mode=mode if kind == "research" else "chat", lang=language, tone=tone,
-                                     max_results=results, attachments=attachments, location=location)
+                                     max_results=results, attachments=attachments, location=location,
+                                     effort=effort)
         except ValueError:
             raise HTTPException(409, "attachments")
         runner.start(turn_id)
@@ -227,7 +238,7 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     @router.get("/config")
     async def config():
         return {"modes": list(MODES), "tones": list(TONES), "langs": list(LANGS), "ui": list(UI_LANGS),
-                "max_results": default_results}
+                "efforts": list(EFFORTS), "max_results": default_results}
 
     @router.get("/threads")
     async def threads():
@@ -239,10 +250,11 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         body = await body_of(request)
         question = clean_question(body.get("question"))
         mode, tone, ui, lang, results = options(body, default_results)
+        effort = effort_option(body)
         attachments, location = extras(body)
         thread_id = store.create_thread(question)
         try:
-            return begin(thread_id, "research", question, mode, tone, ui, lang, results, attachments, location)
+            return begin(thread_id, "research", question, mode, tone, ui, lang, results, attachments, location, effort)
         except HTTPException:
             store.delete_thread(thread_id)
             raise
@@ -263,10 +275,11 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         if kind not in ("chat", "research"):
             raise HTTPException(400, "kind")
         mode, tone, ui, lang, results = options(body, default_results)
+        effort = effort_option(body)
         attachments, location = extras(body)
         if store.thread(thread_id) is None:
             raise HTTPException(404, "thread")
-        return begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments, location)
+        return begin(thread_id, kind, question, mode, tone, ui, lang, results, attachments, location, effort)
 
     @router.delete("/threads/{thread_id}")
     async def delete(thread_id: str, request: Request):

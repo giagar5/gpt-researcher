@@ -31,15 +31,18 @@
   const MODE_ICON = {quick: "bolt", detailed: "layers", deep: "dive"};
   const TONES = ["Objective", "Explanatory", "Analytical", "Critical", "Comparative", "Formal", "Simple", "Casual"];
   const LANGS = ["it", "fr", "en", "de", "es", "nl"];
+  const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
   const browser = (navigator.language || "it").slice(0, 2);
   const state = {
     ui: store.get("s5.ui", ["it", "fr", "en"].includes(browser) ? browser : "it"),
     mode: store.get("s5.mode", "quick"), kind: store.get("s5.kind", "chat"),
     lang: store.get("s5.lang", "auto"), tone: store.get("s5.tone", "Objective"),
+    effort: store.get("s5.effort", ""),
     sites: Number(store.get("s5.sites", "0")) || 8,
     threads: [], thread: null, streams: new Map(), live: new Map(), timers: new Set(), expired: false, libLimit: 8,
   };
   if (!MODES.includes(state.mode)) state.mode = "quick";
+  if (!EFFORTS.includes(state.effort)) state.effort = "";
   let T = I18N[state.ui] || I18N.it;
   const md = new showdown.Converter({tables: true, strikethrough: true, simplifiedAutoLink: true,
     excludeTrailingPunctuationFromURLs: true, ghCodeBlocks: true, tasklists: true, noHeaderId: true});
@@ -86,6 +89,7 @@
     buildSeg($("#kinds"), ["chat", "research"], state.kind, k => T.kinds[k], k => { state.kind = k; store.set("s5.kind", k); }, {chat: "book", research: "globe"});
     fillSelect($("#lang"), ["auto", ...LANGS], state.lang, v => v === "auto" ? T.langAuto : T.langNames[v]);
     fillSelect($("#tone"), TONES, state.tone, v => T.tones[v]);
+    fillSelect($("#effort"), EFFORTS, state.effort, v => v ? T.efforts[v] : T.effortAuto);
     hint();
     renderLibrary();
     renderRecent();
@@ -239,6 +243,7 @@
     const meta = $(".meta", node); meta.replaceChildren();
     meta.append(el("span", "", turn.kind === "chat" ? T.kinds.chat : T.modes[turn.mode] || turn.mode));
     meta.append(el("span", "", T.langNames[turn.lang] || turn.lang));
+    if (turn.effort) meta.append(el("span", "", `${T.effort}: ${T.efforts[turn.effort] || turn.effort}`));
     if (turn.status !== "done") meta.append(el("span", "", T.status[turn.status] || turn.status));
     const when = new Date((turn.finished || turn.created) * 1000);
     meta.append(el("span", "", when.toLocaleString(state.ui, {dateStyle: "medium", timeStyle: "short"})));
@@ -700,7 +705,7 @@
   /* ---------- asking ---------- */
   function payload(question, kind, mode, composer) {
     return {question, kind, mode: mode || state.mode, ui: state.ui, lang: state.lang, tone: state.tone,
-      max_results: state.sites, ...(composer ? composer.extras() : {})};
+      effort: state.effort, max_results: state.sites, ...(composer ? composer.extras() : {})};
   }
   async function ask(question, kind, mode, composer) {
     if (!state.thread) return false;
@@ -755,6 +760,7 @@
     });
     $("#lang").addEventListener("change", e => { state.lang = e.target.value; store.set("s5.lang", state.lang); });
     $("#tone").addEventListener("change", e => { state.tone = e.target.value; store.set("s5.tone", state.tone); });
+    $("#effort").addEventListener("change", e => { state.effort = e.target.value; store.set("s5.effort", state.effort); });
     const sites = $("#sites"), out = $("#sitesOut");
     const syncSites = () => { out.textContent = sites.value; };
     sites.addEventListener("input", () => { state.sites = Number(sites.value); store.set("s5.sites", sites.value); syncSites(); });

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .effort import reasoning
 from .media import attachment_context, location_text
 from .tokens import metered
 
@@ -206,11 +207,12 @@ class Runner:
                     context = await self._context(job, turn)
                     if self.uploads is not None and turn["attachments"]:
                         extra.update(self.uploads.tokens(job.turn_id))
-                    if turn["kind"] == "chat":
-                        fields = await self._chat(turn, config, context)
-                    else:
-                        await job.emit({"t": "phase", "phase": "plan"})
-                        fields = await self._research(job, turn, config, context)
+                    with reasoning(turn.get("effort") or ""):
+                        if turn["kind"] == "chat":
+                            fields = await self._chat(turn, config, context)
+                        else:
+                            await job.emit({"t": "phase", "phase": "plan"})
+                            fields = await self._research(job, turn, config, context)
                     status = "done"
             except asyncio.CancelledError:
                 status, fields = "cancelled", {"error": "cancelled"}

@@ -84,6 +84,8 @@ class Store:
                 conn.execute("ALTER TABLE turns ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
             if "location" not in columns:
                 conn.execute("ALTER TABLE turns ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+            if "effort" not in columns:
+                conn.execute("ALTER TABLE turns ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -114,7 +116,8 @@ class Store:
                          (thread_id, title[:160], now, now))
         return thread_id
 
-    def add_turn(self, thread_id, *, kind, question, mode, lang, tone, max_results, attachments=(), location=None):
+    def add_turn(self, thread_id, *, kind, question, mode, lang, tone, max_results, attachments=(), location=None,
+                 effort=""):
         """attachments: ids of finished, unbound uploads; they are bound to the new turn atomically."""
         now = self.clock()
         turn_id = new_id()
@@ -133,10 +136,10 @@ class Store:
                                    (thread_id,)).fetchone()[0]
                 conn.execute(
                     "INSERT INTO turns(id,thread_id,seq,kind,question,mode,lang,tone,max_results,status,created,"
-                    "attachments,location) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    "attachments,location,effort) VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?,?,?)",
                     (turn_id, thread_id, seq, kind, question, mode, lang, tone, max_results, now,
                      json.dumps(snapshot, ensure_ascii=False),
-                     json.dumps(location, ensure_ascii=False) if location else ""))
+                     json.dumps(location, ensure_ascii=False) if location else "", effort or ""))
                 for item in snapshot:
                     conn.execute("UPDATE uploads SET turn_id=?, updated=? WHERE id=?", (turn_id, now, item["id"]))
                 conn.execute("UPDATE threads SET updated=? WHERE id=?", (now, thread_id))

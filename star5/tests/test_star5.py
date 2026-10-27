@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 import star5.web as web
+from star5 import effort
 from star5.runner import build_sources, detect_lang, normalize
 from star5.store import Store
 from star5.web import drop_event_logs, install
@@ -49,9 +50,11 @@ class Fakes:
         self.media_gate = None
         self.media_fails = False
         self.geocoded = []
+        self.efforts = []
 
     async def brief(self, question, language, previous, config_path, extra=""):
         self.briefs.append({"question": question, "language": language, "previous": previous, "extra": extra})
+        self.efforts.append(("brief", effort.current()))
         if self.brief_fails:
             raise RuntimeError("model unavailable")
         return f"Question: {question}\nDeliverable: shortlist of named candidates\n"
@@ -77,6 +80,7 @@ class Fakes:
                            "lang": json.loads(Path(config_path).read_text())["LANGUAGE"]})
         if doc_path is not None:
             self.calls[-1]["docs"] = {p.name: p.read_text() for p in sorted(Path(doc_path).iterdir())}
+        self.efforts.append(("research", await asyncio.create_task(asyncio.sleep(0, effort.current()))))
         await sink.send_json({"type": "logs", "content": "subqueries", "output": "plan",
                               "metadata": ["query uno", "query due"]})
         await sink.send_json({"type": "logs", "content": "running_subquery_research",
@@ -97,6 +101,7 @@ class Fakes:
 
     async def chat(self, report, messages, config_path):
         self.chats.append({"report": report, "messages": messages})
+        self.efforts.append(("chat", effort.current()))
         await fake_model_call(300, 50)
         return "Risposta dal rapporto.", [{"url": "https://brave.example/r", "title": "R"}]
 
@@ -479,6 +484,48 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], (50.717, 4.612), "coordinates must be rounded before leaving the server")
         asyncio.run(geocoder(50.71749, 4.61201, "fr"))
         self.assertEqual(len(calls), 1, "same area must come from the cache")
+
+
+class EffortTests(Star5Case):
+    def test_effort_reaches_brief_research_and_nested_tasks_then_follow_up_chat(self):
+        config = self.client.get("/api/s5/config").json()
+        self.assertEqual(config["efforts"], ["low", "medium", "high", "xhigh", "max"])
+        started = self.start(effort="xhigh")
+        done = self.events(started["turn"])[-1]["turn"]
+        self.assertEqual((done["status"], done["effort"]), ("done", "xhigh"))
+        self.assertEqual(self.fakes.efforts, [("brief", "xhigh"), ("research", "xhigh")])
+        turn = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H,
+                                json={"question": "E quindi?", "kind": "chat", "effort": "low"}).json()
+        self.assertEqual(self.events(turn["turn"])[-1]["turn"]["effort"], "low")
+        self.assertEqual(self.fakes.efforts[-1], ("chat", "low"))
+        self.assertEqual(effort.current(), "", "effort must not leak outside the job")
+
+    def test_default_effort_is_the_models_and_invalid_is_rejected(self):
+        started = self.start()
+        done = self.events(started["turn"])[-1]["turn"]
+        self.assertEqual(done["effort"], "")
+        self.assertEqual(self.fakes.efforts, [("brief", ""), ("research", "")])
+        for bad in ("ultra", "none", 3):
+            response = self.client.post("/api/s5/threads", headers=H, json={"question": "q", "effort": bad})
+            self.assertEqual(response.status_code, 400, bad)
+        self.assertEqual(len(self.client.get("/api/s5/threads").json()["threads"]), 1)
+
+    def test_hook_sets_reasoning_effort_on_the_real_langchain_client(self):
+        from gpt_researcher.llm_provider.generic.base import GenericLLMProvider
+        effort.install()
+        effort.install()
+        args = dict(model="frontier", api_key="unit-test", azure_endpoint="https://proxy.test",
+                    api_version="2024-06-01", max_tokens=100)
+        self.assertIsNone(GenericLLMProvider.from_provider("azure_openai", **args).llm.reasoning_effort)
+        with effort.reasoning("max"):
+            llm = GenericLLMProvider.from_provider("azure_openai", **args).llm
+            self.assertEqual(llm.reasoning_effort, "max")
+            payload = llm._get_request_payload([AIMessage(content="ciao")])
+            self.assertEqual(payload["reasoning_effort"], "max")
+            self.assertNotIn("reasoning", payload, "must stay a Chat Completions request")
+            self.assertEqual(effort.apply("anthropic", {}), {})
+        with effort.reasoning("bogus"):
+            self.assertEqual(effort.current(), "")
 
 
 class ApiTests(Star5Case):
