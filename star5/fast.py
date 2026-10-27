@@ -90,11 +90,13 @@ def install_brave_guard():
         if results:
             return results
         try:
-            from gpt_researcher.retrievers.duckduckgo.duckduckgo import Duckduckgo
-            results = Duckduckgo(self.query).search(max_results=max_results)
+            items = _ddg_text(self.query, max(3, min(int(max_results), 20)))
         except Exception as error:
             LOG.warning("Brave and DuckDuckGo both failed for %r: %s", self.query, error)
             return []
+        # Same shape as GPT Researcher's Duckduckgo retriever: a short body means "scrape the page".
+        results = [{"href": item["href"], "body": (item.get("body") or "")[:100], "title": item.get("title") or ""}
+                   for item in items if item.get("href")]
         if results:
             LOG.warning("Brave gave nothing for %r; used DuckDuckGo", self.query)
         return results
@@ -183,9 +185,24 @@ async def brave(client, key, query, count):
     return found
 
 
+AD_HOSTS = ("bing.com", "duckduckgo.com")
+
+
 def _ddg_text(query, count):
+    """ddgs with the duckduckgo backend only: "auto" adds Bing ads and a Wikipedia backend that fails
+    the whole call (wt.wikipedia.org does not exist for region wt-wt). One retry, ads dropped."""
     from ddgs import DDGS
-    return DDGS().text(query, region="wt-wt", max_results=count) or []
+    for attempt in range(2):
+        try:
+            items = DDGS().text(query, region="wt-wt", backend="duckduckgo", max_results=count) or []
+        except Exception:
+            if attempt:
+                raise
+            time.sleep(1.0)
+            continue
+        return [item for item in items if isinstance(item, dict)
+                and not (urlsplit(item.get("href") or "").hostname or "").endswith(AD_HOSTS)]
+    return []
 
 
 async def duckduckgo(query, count, search_fn=_ddg_text):

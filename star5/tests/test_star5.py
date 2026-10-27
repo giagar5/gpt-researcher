@@ -689,12 +689,32 @@ class FastPipelineTests(unittest.TestCase):
         self.assertEqual(search.query, "Dove trovo X?")
         self.assertEqual(BraveSearch("breve").query, "breve")
         from unittest import mock
-        from gpt_researcher.retrievers.duckduckgo.duckduckgo import Duckduckgo
-        backup = [{"href": "https://ddg.example/", "body": "b", "title": "t"}]
+        backup = [{"href": "https://ddg.example/", "body": "b" * 300, "title": "t"}]
         with mock.patch("gpt_researcher.retrievers.brave.brave.requests.get", side_effect=OSError("402")), \
-                mock.patch.object(Duckduckgo, "search", return_value=backup) as ddg:
-            self.assertEqual(BraveSearch("breve").search(max_results=5), backup)
-        ddg.assert_called_once_with(max_results=5)
+                mock.patch.object(self.fast, "_ddg_text", return_value=backup) as ddg:
+            self.assertEqual(BraveSearch("breve").search(max_results=5),
+                             [{"href": "https://ddg.example/", "body": "b" * 100, "title": "t"}])
+        ddg.assert_called_once_with("breve", 5)
+        with mock.patch("gpt_researcher.retrievers.brave.brave.requests.get", side_effect=OSError("402")), \
+                mock.patch.object(self.fast, "_ddg_text", side_effect=RuntimeError("down")):
+            self.assertEqual(BraveSearch("breve").search(max_results=5), [])
+
+    def test_ddg_uses_duckduckgo_backend_retries_once_and_drops_ads(self):
+        from unittest import mock
+        calls = []
+
+        class FakeDDGS:
+            def text(self, query, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    raise RuntimeError("DNSError wt.wikipedia.org")
+                return [{"href": "https://www.bing.com/aclick?x=1", "title": "ad"},
+                        {"href": "https://real.example/", "title": "ok"}]
+        with mock.patch("ddgs.DDGS", FakeDDGS), mock.patch.object(self.fast.time, "sleep"):
+            items = self.fast._ddg_text("q", 6)
+        self.assertEqual([i["href"] for i in items], ["https://real.example/"])
+        self.assertEqual(calls[0], {"region": "wt-wt", "backend": "duckduckgo", "max_results": 6})
+        self.assertEqual(len(calls), 2)
 
     def test_only_public_hosts(self):
         is_public = self.fast.is_public
