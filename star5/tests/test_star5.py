@@ -51,6 +51,7 @@ class Fakes:
         self.media_fails = False
         self.geocoded = []
         self.efforts = []
+        self.fast_calls = []
 
     async def brief(self, question, language, previous, config_path, extra=""):
         self.briefs.append({"question": question, "language": language, "previous": previous, "extra": extra})
@@ -99,6 +100,19 @@ class Fakes:
         return (answer, [{"url": "https://www.sqlite.org/wal.html", "title": "Write-Ahead Logging"}],
                 ["https://other.org/read"], {"md": "outputs/t1.md"})
 
+    async def fast(self, question, language, earlier, extra, files_text, location, max_results, config_path, sink):
+        self.fast_calls.append({"question": question, "language": language, "earlier": earlier, "extra": extra,
+                                "files": files_text, "location": location, "max": max_results})
+        self.efforts.append(("fast", effort.current()))
+        await sink.send_json({"type": "logs", "content": "subqueries", "output": "plan", "metadata": ["thai Wavre"]})
+        await sink.send_json({"type": "logs", "content": "running_subquery_research",
+                              "output": "🔍 Running research for 'thai Wavre'..."})
+        await sink.send_json({"type": "logs", "content": "added_source_url",
+                              "output": "✅ Added source url to research: https://phimai.example/\n"})
+        await sink.send_json({"type": "logs", "content": "writing_report", "output": "Writing"})
+        await fake_model_call(400, 90)
+        answer = "**Phimai** ([sito](https://phimai.example/))."
+        return answer, [{"url": "https://phimai.example/", "title": "Phimai"}], ["https://phimai.example/"], {}
     async def chat(self, report, messages, config_path):
         self.chats.append({"report": report, "messages": messages})
         self.efforts.append(("chat", effort.current()))
@@ -147,7 +161,8 @@ class Star5Case(unittest.TestCase):
         web.OUTPUTS = (Path(self.tmp.name) / "outputs").resolve()
         self.runner = install(self.app, data_dir=Path(self.tmp.name) / "data", base_config=str(base),
                               research_fn=self.fakes.research, chat_fn=self.fakes.chat, brief_fn=self.fakes.brief,
-                              media_fn=self.fakes.process_media, geocode_fn=self.fakes.geocode)
+                              media_fn=self.fakes.process_media, geocode_fn=self.fakes.geocode,
+                              fast_fn=self.fakes.fast)
         self.uploads = self.app.state.star5_uploads
         self.data = Path(self.tmp.name) / "data"
         self.runner.tick_every = 0.02
@@ -484,6 +499,177 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], (50.717, 4.612), "coordinates must be rounded before leaving the server")
         asyncio.run(geocoder(50.71749, 4.61201, "fr"))
         self.assertEqual(len(calls), 1, "same area must come from the cache")
+
+
+class FastModeTests(Star5Case):
+    def test_fast_mode_skips_brief_and_agent_and_defaults_to_low_reasoning(self):
+        started = self.start("mi trovi un buon ristorante thai a Wavre?", mode="fast",
+                             location={"lat": 50.7171, "lon": 4.6123, "accuracy": 30, "label": "Wavre"})
+        events = self.events(started["turn"])
+        done = events[-1]["turn"]
+        self.assertEqual((done["status"], done["mode"], done["effort"]), ("done", "fast", ""))
+        self.assertEqual(self.fakes.briefs, [], "Veloce must not write a research brief")
+        self.assertEqual(self.fakes.calls, [], "Veloce must not run the GPT Researcher agent")
+        self.assertEqual(self.fakes.efforts, [("fast", "low")])
+        call = self.fakes.fast_calls[0]
+        self.assertEqual((call["language"], call["max"]), ("italian", 8))
+        self.assertIn("Wavre (latitude 50.717", call["location"])
+        phases = [e["phase"] for e in events if e["t"] == "phase"]
+        self.assertEqual(phases, ["plan", "search", "read", "write"])
+        self.assertIn({"t": "queries", "items": ["thai Wavre"]}, events)
+        self.assertEqual(done["sources"][0], {"url": "https://phimai.example/", "title": "Phimai",
+                                              "domain": "phimai.example", "cited": True})
+        self.assertEqual((done["tokens_in"], done["tokens_out"], done["llm_calls"]), (400, 90, 1))
+
+    def test_explicit_effort_wins_and_follow_up_web_search_keeps_context(self):
+        started = self.start("Prima domanda sulle pompe di calore in Belgio", mode="fast", effort="high")
+        self.events(started["turn"])
+        self.assertEqual(self.fakes.efforts, [("fast", "high")])
+        upload_id = self.upload(name="preventivo.pdf", mime="application/pdf")
+        self.wait_upload(upload_id)
+        turn = self.client.post(f"/api/s5/threads/{started['thread']}/turns", headers=H, json={
+            "question": "E per un appartamento?", "kind": "research", "mode": "fast",
+            "attachments": [upload_id]}).json()
+        self.assertEqual(self.events(turn["turn"])[-1]["turn"]["status"], "done")
+        call = self.fakes.fast_calls[-1]
+        self.assertEqual(call["earlier"], "Prima domanda sulle pompe di calore in Belgio")
+        self.assertIn("Contenuto di preventivo.pdf", call["files"])
+        self.assertIn("preventivo.pdf", call["extra"])
+
+    def test_fast_answer_does_not_wait_behind_a_long_research(self):
+        self.fakes.gate = asyncio.Event()
+        slow = self.start("Una ricerca lunga che resta in corso", mode="quick")
+        time.sleep(0.2)
+        quick = self.start("Una domanda veloce mentre l'altra è in corso", mode="fast")
+        self.assertEqual(self.events(quick["turn"])[-1]["turn"]["status"], "done")
+        self.client.portal.call(self.fakes.gate.set)
+        self.assertEqual(self.events(slow["turn"])[-1]["turn"]["status"], "done")
+
+
+class FastPipelineTests(unittest.TestCase):
+    def setUp(self):
+        import httpx
+        from star5 import fast
+        self.fast, self.httpx = fast, httpx
+        self.events = []
+        self.requests = []
+        os.environ["BRAVE_API_KEY"] = "unit-test-brave"
+        self.addCleanup(os.environ.pop, "BRAVE_API_KEY", None)
+
+    class Sink:
+        def __init__(self, events):
+            self.events = events
+
+        async def send_json(self, data):
+            self.events.append(data)
+
+    def transport(self, pages, brave_status=None):
+        async def handler(request):
+            self.requests.append(str(request.url))
+            if request.url.host == "api.search.brave.com":
+                assert request.headers["x-subscription-token"] == "unit-test-brave"
+                status = brave_status.pop(0) if brave_status else 200
+                query = request.url.params["q"]
+                results = [{"url": f"https://{query.split()[0]}.example/{i}", "title": f"<strong>{query}</strong> {i}",
+                            "description": "Desc &amp; more", "extra_snippets": ["extra"]} for i in range(3)]
+                results.append({"url": "https://shared.example/", "title": "Shared", "description": "s"})
+                return self.httpx.Response(status, json={"web": {"results": results}} if status == 200 else {})
+            body = pages.get(str(request.url))
+            if body is None:
+                return self.httpx.Response(404)
+            if body == "slow":
+                await asyncio.sleep(0.3)
+                return self.httpx.Response(200, text="<p>too late</p>", headers={"content-type": "text/html"})
+            return self.httpx.Response(200, text=body, headers={"content-type": "text/html; charset=utf-8"})
+        return self.httpx.MockTransport(handler)
+
+    def run_fast(self, **overrides):
+        captured = {}
+
+        async def planner(question, earlier, extra, config_path):
+            return ["alpha query", "beta query"]
+
+        async def writer(question, language, earlier, files_text, location, results, config_path):
+            captured["block"] = self.fast.sources_block(results)
+            captured["results"] = results
+            return "Risposta [alpha](https://alpha.example/0)."
+
+        async def files_fn(answer, question):
+            return {"md": "outputs/x.md", "pdf": ""}
+
+        async def guard(request):
+            if request.url.host.endswith(".private"):
+                raise self.httpx.RequestError("blocked", request=request)
+
+        kwargs = dict(planner=planner, writer=writer, files_fn=files_fn, guard=guard,
+                      transport=self.transport(overrides.pop("pages", {}), overrides.pop("brave_status", None)))
+        kwargs.update(overrides)
+        out = asyncio.run(self.fast.fast_research("Domanda?", "italian", "", "", "", "", 8, "cfg",
+                                                  self.Sink(self.events), **kwargs))
+        return out, captured
+
+    def test_search_read_and_answer(self):
+        pages = {"https://alpha.example/0": "<html><nav>menu</nav><main><h1>Alpha</h1><p>Contenuto utile alpha</p>"
+                                            "<script>x()</script></main></html>",
+                 "https://beta.example/0": "<html><body><p>Beta text</p></body></html>"}
+        (answer, sources, visited, files), captured = self.run_fast(pages=pages)
+        self.assertEqual(answer, "Risposta [alpha](https://alpha.example/0).")
+        self.assertEqual([s["url"] for s in sources][:4], ["https://alpha.example/0", "https://beta.example/0",
+                                                          "https://alpha.example/1", "https://beta.example/1"])
+        self.assertEqual(sum(1 for s in sources if s["url"] == "https://shared.example/"), 1, "duplicates merged")
+        self.assertEqual(sources[0]["title"], "alpha query 0", "HTML stripped from Brave titles")
+        self.assertEqual(visited, ["https://alpha.example/0", "https://beta.example/0"])
+        self.assertEqual(files, {"md": "outputs/x.md", "pdf": ""})
+        self.assertIn("Page text:\nAlpha\nContenuto utile alpha", captured["block"])
+        self.assertNotIn("menu", captured["block"])
+        self.assertNotIn("x()", captured["block"])
+        self.assertIn("Snippet: Desc & more … extra", captured["block"])
+        kinds = [e.get("content") or e["type"] for e in self.events]
+        self.assertEqual(kinds, ["subqueries", "running_subquery_research", "running_subquery_research",
+                                 "added_source_url", "added_source_url", "writing_report", "report"])
+        self.assertEqual(self.events[0]["metadata"], ["alpha query", "beta query"])
+
+    def test_brave_retry_on_429_slow_pages_and_private_hosts(self):
+        old = self.fast.FETCH_DEADLINE
+        self.fast.FETCH_DEADLINE = 0.15
+        self.addCleanup(setattr, self.fast, "FETCH_DEADLINE", old)
+        pages = {"https://alpha.example/0": "slow", "https://beta.example/0": "<p>ok beta</p>"}
+        (_, sources, visited, _), _ = self.run_fast(pages=pages, brave_status=[429, 200, 200])
+        self.assertGreaterEqual(len(sources), 7)
+        self.assertEqual(visited, ["https://beta.example/0"], "slow page dropped at the deadline")
+
+    def test_no_results_and_missing_key_fail_clearly(self):
+        with self.assertRaisesRegex(RuntimeError, "no results"):
+            self.run_fast(brave_status=[500, 500])
+        os.environ.pop("BRAVE_API_KEY")
+        with self.assertRaisesRegex(RuntimeError, "BRAVE_API_KEY"):
+            self.run_fast()
+
+    def test_query_helpers(self):
+        fast = self.fast
+        brief = "Question: Qual è la differenza tra pompa aria-acqua e aria-aria?\n\nGoal: " + "parola " * 200
+        self.assertEqual(fast.short_query(brief), "Qual è la differenza tra pompa aria-acqua e aria-aria?")
+        self.assertLessEqual(len(fast.short_query("x" * 900)), 380)
+        self.assertLessEqual(len(fast.short_query(" ".join(["w"] * 80)).split()), 45)
+        self.assertEqual(fast.short_query("  breve   domanda "), "breve domanda")
+        self.assertEqual(fast.parse_queries('Ecco: {"queries": ["a b", "A B", "c", "d", "e"]}', "q"), ["a b", "c", "d"])
+        self.assertEqual(fast.parse_queries("niente json", "la domanda"), ["la domanda"])
+        self.assertEqual(fast.parse_queries('{"queries": [1, null]}', "q"), ["q"])
+
+    def test_brave_guard_shortens_gpt_researcher_queries(self):
+        from gpt_researcher.retrievers.brave.brave import BraveSearch
+        self.fast.install_brave_guard()
+        self.fast.install_brave_guard()
+        search = BraveSearch("Question: Dove trovo X?\n\nGoal: " + "lungo " * 300)
+        self.assertEqual(search.query, "Dove trovo X?")
+        self.assertEqual(BraveSearch("breve").query, "breve")
+
+    def test_only_public_hosts(self):
+        is_public = self.fast.is_public
+        for host in ("localhost", "10.183.20.1", "192.168.178.150", "127.0.0.1", "169.254.169.254", "[::1]",
+                     "printer.local", "fd00::1", ""):
+            self.assertFalse(asyncio.run(is_public(host)), host)
+        self.assertTrue(asyncio.run(is_public("8.8.8.8")))
 
 
 class EffortTests(Star5Case):

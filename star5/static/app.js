@@ -27,21 +27,22 @@
   };
   const icon = name => { const s = document.createElementNS("http://www.w3.org/2000/svg", "svg"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("aria-hidden", "true"); s.innerHTML = ICON[name]; return s; };
 
-  const MODES = ["quick", "detailed", "deep"];
-  const MODE_ICON = {quick: "bolt", detailed: "layers", deep: "dive"};
+  const MODES = ["fast", "quick", "deep"];
+  const MODE_ICON = {fast: "bolt", quick: "layers", deep: "dive"};
   const TONES = ["Objective", "Explanatory", "Analytical", "Critical", "Comparative", "Formal", "Simple", "Casual"];
   const LANGS = ["it", "fr", "en", "de", "es", "nl"];
   const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"];
   const browser = (navigator.language || "it").slice(0, 2);
   const state = {
     ui: store.get("s5.ui", ["it", "fr", "en"].includes(browser) ? browser : "it"),
-    mode: store.get("s5.mode", "quick"), kind: store.get("s5.kind", "chat"),
+    mode: store.get("s5.mode", "fast"), kind: store.get("s5.kind", "chat"),
     lang: store.get("s5.lang", "auto"), tone: store.get("s5.tone", "Objective"),
     effort: store.get("s5.effort", ""),
     sites: Number(store.get("s5.sites", "0")) || 8,
     threads: [], thread: null, streams: new Map(), live: new Map(), timers: new Set(), expired: false, libLimit: 8,
   };
-  if (!MODES.includes(state.mode)) state.mode = "quick";
+  if (state.mode === "detailed") state.mode = "deep";
+  if (!MODES.includes(state.mode)) state.mode = "fast";
   if (!EFFORTS.includes(state.effort)) state.effort = "";
   let T = I18N[state.ui] || I18N.it;
   const md = new showdown.Converter({tables: true, strikethrough: true, simplifiedAutoLink: true,
@@ -85,7 +86,7 @@
     document.querySelectorAll("[data-i18n-title]").forEach(e => { e.title = T[e.dataset.i18nTitle] || ""; e.setAttribute("aria-label", e.title); });
     document.querySelectorAll("[data-i18n-aria]").forEach(e => e.setAttribute("aria-label", T[e.dataset.i18nAria] || ""));
     $("#uiLang").value = state.ui;
-    buildSeg($("#modes"), MODES, state.mode, m => T.modes[m], m => { state.mode = m; store.set("s5.mode", m); hint(); }, MODE_ICON);
+    buildSeg($("#modes"), MODES, state.mode, modeLabel, m => { state.mode = m; store.set("s5.mode", m); hint(); }, MODE_ICON);
     buildSeg($("#kinds"), ["chat", "research"], state.kind, k => T.kinds[k], k => { state.kind = k; store.set("s5.kind", k); }, {chat: "book", research: "globe"});
     fillSelect($("#lang"), ["auto", ...LANGS], state.lang, v => v === "auto" ? T.langAuto : T.langNames[v]);
     fillSelect($("#tone"), TONES, state.tone, v => T.tones[v]);
@@ -97,6 +98,11 @@
     if (state.thread) renderThread();
   }
   function hint() { $("#modeHint").textContent = T.modeHints[state.mode]; }
+  function modeLabel(m) {
+    const f = document.createDocumentFragment();
+    f.append(T.modes[m], el("span", "seg-time", T.modeTimes[m]));
+    return f;
+  }
   function buildSeg(root, values, current, label, onPick, icons) {
     root.replaceChildren();
     values.forEach(v => {

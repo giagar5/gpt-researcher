@@ -101,6 +101,9 @@ button{cursor:pointer}
 .seg button[aria-checked="true"]{background:var(--cp-surface);color:var(--cp-text);font-weight:600;box-shadow:var(--card)}
 .seg.small button{padding:4px 10px;font-size:13px}
 .seg svg{width:16px;height:16px}
+.seg-time{font-size:12px;font-weight:400;color:var(--cp-text-muted);opacity:.85}
+.seg-time:empty{display:none}
+#modes button{padding:6px 10px;gap:5px}
 .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--cp-border);background:transparent;
   border-radius:999px;padding:6px 12px;font-size:14px;color:var(--cp-text-muted)}
 .chip[aria-expanded="true"]{background:var(--cp-accent-soft);color:var(--cp-text)}
@@ -281,6 +284,9 @@ button{cursor:pointer}
   .follow{margin-left:-14px;margin-right:-14px;width:calc(100% + 28px);max-width:none;border-radius:20px 20px 0 0}
   .cards{grid-auto-columns:minmax(170px,72%)}
   .seg button{padding:6px 10px}
+  #modes{flex-wrap:nowrap}
+  #modes button{padding:6px 9px;gap:4px}
+  #modes .seg-time{display:none}
   .att-chip{max-width:calc(100vw - 60px)}
   .tool{width:34px;height:34px}
 }

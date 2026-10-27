@@ -17,7 +17,7 @@ LOG = logging.getLogger("star5")
 
 LANGS = {"it": "italian", "fr": "french", "en": "english", "de": "german", "es": "spanish", "nl": "dutch"}
 UI_LANGS = ("it", "fr", "en")
-MODES = {"quick": "research_report", "detailed": "detailed_report", "deep": "deep"}
+MODES = {"fast": "fast", "quick": "research_report", "detailed": "detailed_report", "deep": "deep"}
 TONES = ("Objective", "Explanatory", "Analytical", "Critical", "Comparative", "Formal", "Simple", "Casual")
 MAX_QUESTION = 2000
 KEEP_FINISHED = 600
@@ -161,17 +161,19 @@ class Sink:
 
 class Runner:
     def __init__(self, store, research_fn, chat_fn, configs, clock=time.time,
-                 research_slots=1, chat_slots=2, brief_fn=None, uploads=None, docs_root=None):
+                 research_slots=1, chat_slots=2, brief_fn=None, uploads=None, docs_root=None, fast_fn=None):
         self.store = store
         self.research_fn = research_fn
         self.chat_fn = chat_fn
         self.brief_fn = brief_fn
+        self.fast_fn = fast_fn
         self.uploads = uploads
         self.docs_root = Path(docs_root) if docs_root else None
         self.configs = configs
         self.clock = clock
         self.jobs = {}
-        self.slots = {"research": asyncio.Semaphore(research_slots), "chat": asyncio.Semaphore(chat_slots)}
+        self.slots = {"research": asyncio.Semaphore(research_slots), "chat": asyncio.Semaphore(chat_slots),
+                      "fast": asyncio.Semaphore(chat_slots)}
         self.tick_every = 3
 
     def start(self, turn_id):
@@ -196,23 +198,30 @@ class Runner:
     async def _run(self, job):
         turn = self.store.turn(job.turn_id)
         status, fields = "error", {}
+        fast = turn["kind"] == "research" and turn["mode"] == "fast" and self.fast_fn is not None
+        # Veloce answers in its own lane, so it never waits behind a long research.
+        slot = "fast" if fast else turn["kind"]
         with metered() as meter:
             extra = {"tokens_in": 0, "tokens_out": 0, "llm_calls": 0}
             ticker = asyncio.create_task(self._tick(job, meter, self.tick_every, extra))
             try:
-                async with self.slots[turn["kind"]]:
+                async with self.slots[slot]:
                     self.store.update_turn(job.turn_id, status="running", started=self.clock())
                     await job.emit({"t": "status", "status": "running"})
                     config = self.configs[turn["lang"]]
                     context = await self._context(job, turn)
                     if self.uploads is not None and turn["attachments"]:
                         extra.update(self.uploads.tokens(job.turn_id))
-                    with reasoning(turn.get("effort") or ""):
+                    # Veloce defaults to low reasoning; an explicit choice always wins.
+                    with reasoning(turn.get("effort") or ("low" if fast else "")):
                         if turn["kind"] == "chat":
                             fields = await self._chat(turn, config, context)
                         else:
                             await job.emit({"t": "phase", "phase": "plan"})
-                            fields = await self._research(job, turn, config, context)
+                            if fast:
+                                fields = await self._fast(job, turn, config, context)
+                            else:
+                                fields = await self._research(job, turn, config, context)
                     status = "done"
             except asyncio.CancelledError:
                 status, fields = "cancelled", {"error": "cancelled"}
@@ -299,6 +308,15 @@ class Runner:
                 task = f"{task}\n\n{extra[:4000]}"
         answer, research_sources, visited, files = await self.research_fn(
             task, MODES[turn["mode"]], turn["tone"], turn["max_results"], config, Sink(job), context["docs"])
+        await job.emit({"t": "phase", "phase": "write"})
+        return {"answer": answer, "sources": build_sources(answer, research_sources, visited), "files": files}
+
+    async def _fast(self, job, turn, config, context):
+        previous = [t for t in self.store.history(turn["thread_id"], turn["seq"]) if t["kind"] == "research"]
+        earlier = previous[-1]["question"] if previous else ""
+        answer, research_sources, visited, files = await self.fast_fn(
+            turn["question"], LANGS[turn["lang"]], earlier, self._extra(context), context["full"],
+            context["location"], turn["max_results"], config, Sink(job))
         await job.emit({"t": "phase", "phase": "write"})
         return {"answer": answer, "sources": build_sources(answer, research_sources, visited), "files": files}
 
