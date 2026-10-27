@@ -601,7 +601,7 @@ class FastPipelineTests(unittest.TestCase):
             if request.url.host.endswith(".private"):
                 raise self.httpx.RequestError("blocked", request=request)
 
-        kwargs = dict(planner=planner, writer=writer, files_fn=files_fn, guard=guard,
+        kwargs = dict(planner=planner, writer=writer, files_fn=files_fn, guard=guard, backup=None,
                       transport=self.transport(overrides.pop("pages", {}), overrides.pop("brave_status", None)))
         kwargs.update(overrides)
         out = asyncio.run(self.fast.fast_research("Domanda?", "italian", "", "", "", "", 8, "cfg",
@@ -638,12 +638,37 @@ class FastPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(sources), 7)
         self.assertEqual(visited, ["https://beta.example/0"], "slow page dropped at the deadline")
 
-    def test_no_results_and_missing_key_fail_clearly(self):
+    def test_no_results_fail_clearly(self):
         with self.assertRaisesRegex(RuntimeError, "no results"):
             self.run_fast(brave_status=[500, 500])
+
+    def test_duckduckgo_backup_when_brave_is_blocked_or_has_no_key(self):
+        used = []
+
+        async def backup(query, count):
+            used.append(query)
+            return [{"url": f"https://ddg.example/{len(used)}", "title": "DDG", "snippet": "s", "age": ""}]
+        (_, sources, _, _), _ = self.run_fast(brave_status=[402, 402], backup=backup)
+        self.assertEqual(sorted(used), ["alpha query", "beta query"])
+        self.assertEqual({s["url"] for s in sources}, {"https://ddg.example/1", "https://ddg.example/2"})
         os.environ.pop("BRAVE_API_KEY")
-        with self.assertRaisesRegex(RuntimeError, "BRAVE_API_KEY"):
-            self.run_fast()
+        used.clear()
+        self.requests.clear()
+        self.run_fast(backup=backup)
+        self.assertEqual(len(used), 2)
+        self.assertFalse(any("brave.com" in url for url in self.requests), "no Brave call without a key")
+
+    def test_duckduckgo_normalisation(self):
+        def fake(query, count):
+            return [{"href": "https://a.example/", "title": "<b>A</b>", "body": "corpo &amp; testo"},
+                    {"url": "ftp://x"}, "junk", {"link": "https://b.example/", "snippet": "sn"}]
+        found = asyncio.run(self.fast.duckduckgo("q", 5, search_fn=fake))
+        self.assertEqual(found, [{"url": "https://a.example/", "title": "A", "snippet": "corpo & testo", "age": ""},
+                                 {"url": "https://b.example/", "title": "", "snippet": "sn", "age": ""}])
+
+        def broken(query, count):
+            raise RuntimeError("ratelimit")
+        self.assertEqual(asyncio.run(self.fast.duckduckgo("q", 5, search_fn=broken)), [])
 
     def test_query_helpers(self):
         fast = self.fast
@@ -663,6 +688,13 @@ class FastPipelineTests(unittest.TestCase):
         search = BraveSearch("Question: Dove trovo X?\n\nGoal: " + "lungo " * 300)
         self.assertEqual(search.query, "Dove trovo X?")
         self.assertEqual(BraveSearch("breve").query, "breve")
+        from unittest import mock
+        from gpt_researcher.retrievers.duckduckgo.duckduckgo import Duckduckgo
+        backup = [{"href": "https://ddg.example/", "body": "b", "title": "t"}]
+        with mock.patch("gpt_researcher.retrievers.brave.brave.requests.get", side_effect=OSError("402")), \
+                mock.patch.object(Duckduckgo, "search", return_value=backup) as ddg:
+            self.assertEqual(BraveSearch("breve").search(max_results=5), backup)
+        ddg.assert_called_once_with(max_results=5)
 
     def test_only_public_hosts(self):
         is_public = self.fast.is_public

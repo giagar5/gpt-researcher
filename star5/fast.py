@@ -72,19 +72,35 @@ def short_query(query, chars=BRAVE_MAX_CHARS, words=BRAVE_MAX_WORDS):
 
 
 def install_brave_guard():
-    """Shortens every query GPT Researcher sends to Brave (its first search uses the whole brief)."""
+    """GPT Researcher's Brave retriever: short queries (its first search used the whole brief), and
+    DuckDuckGo when Brave returns nothing (usage limit, key or network errors)."""
     try:
         from gpt_researcher.retrievers.brave.brave import BraveSearch
     except ImportError:  # pragma: no cover
         return
     if getattr(BraveSearch, "_star5_guard", False):
         return
-    original = BraveSearch.__init__
+    original_init, original_search = BraveSearch.__init__, BraveSearch.search
 
     def __init__(self, query, *args, **kwargs):
-        original(self, short_query(query), *args, **kwargs)
+        original_init(self, short_query(query), *args, **kwargs)
+
+    def search(self, max_results=7):
+        results = original_search(self, max_results)
+        if results:
+            return results
+        try:
+            from gpt_researcher.retrievers.duckduckgo.duckduckgo import Duckduckgo
+            results = Duckduckgo(self.query).search(max_results=max_results)
+        except Exception as error:
+            LOG.warning("Brave and DuckDuckGo both failed for %r: %s", self.query, error)
+            return []
+        if results:
+            LOG.warning("Brave gave nothing for %r; used DuckDuckGo", self.query)
+        return results
 
     BraveSearch.__init__ = __init__
+    BraveSearch.search = search
     BraveSearch._star5_guard = True
 
 
@@ -165,6 +181,40 @@ async def brave(client, key, query, count):
         found.append({"url": url, "title": clean_html_text(item.get("title"))[:200],
                       "snippet": snippet[:SNIPPET_CHARS], "age": str(item.get("age") or "")[:40]})
     return found
+
+
+def _ddg_text(query, count):
+    from ddgs import DDGS
+    return DDGS().text(query, region="wt-wt", max_results=count) or []
+
+
+async def duckduckgo(query, count, search_fn=_ddg_text):
+    """Backup search when Brave is unavailable (no key, usage limit, errors): ddgs, unofficial and keyless."""
+    try:
+        items = await asyncio.wait_for(asyncio.to_thread(search_fn, query, max(3, min(int(count), 20))), 12)
+    except Exception as error:
+        LOG.warning("Veloce: DuckDuckGo failed for %r: %s", query, error)
+        return []
+    found = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("href") or item.get("url") or item.get("link") or ""
+        if urlsplit(url).scheme not in ("http", "https"):
+            continue
+        snippet = item.get("body") or item.get("snippet") or item.get("description") or ""
+        found.append({"url": url, "title": clean_html_text(item.get("title"))[:200],
+                      "snippet": clean_html_text(snippet)[:SNIPPET_CHARS], "age": ""})
+    return found
+
+
+async def web_search(client, key, query, count, backup=duckduckgo):
+    results = await brave(client, key, query, count) if key else []
+    if not results and backup is not None:
+        results = await backup(query, count)
+        if results:
+            LOG.warning("Veloce: Brave gave nothing for %r; used DuckDuckGo", query)
+    return results
 
 
 def interleave(lists):
@@ -290,10 +340,8 @@ async def log(sink, content, output, **extra):
 
 async def fast_research(question, language, earlier, extra, files_text, location, max_results, config_path, sink, *,
                         planner=plan_queries, writer=write_answer, files_fn=report_files, transport=None,
-                        guard=_guard_request):
-    key = os.environ.get("BRAVE_API_KEY")
-    if not key:
-        raise RuntimeError("Web search is not configured (BRAVE_API_KEY)")
+                        guard=_guard_request, backup=duckduckgo):
+    key = os.environ.get("BRAVE_API_KEY", "")
     queries = await planner(question, earlier, extra, config_path)
     await log(sink, "subqueries", "Search plan: " + " | ".join(queries), metadata=queries)
     timeout = httpx.Timeout(FETCH_DEADLINE, connect=3.0)
@@ -302,7 +350,7 @@ async def fast_research(question, language, earlier, extra, files_text, location
                                  event_hooks={"request": [guard]} if guard else None) as client:
         for query in queries:
             await log(sink, "running_subquery_research", f"🔍 Running research for '{query}'...")
-        lists = await asyncio.gather(*(brave(client, key, q, max_results) for q in queries))
+        lists = await asyncio.gather(*(web_search(client, key, q, max_results, backup) for q in queries))
         results = interleave(lists)
         if not results:
             raise RuntimeError("The web search returned no results")
