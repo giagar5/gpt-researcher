@@ -35,7 +35,7 @@ BRIEF_PROMPT = """You turn a user's question into a research brief for an autono
 The agent plans its sub-queries and writes the final report from this brief alone, so the brief must
 keep the user's real intent and must not drift to side topics.
 
-Write the brief in {language}. Output only the brief: plain text, at most 200 words, these labelled lines:
+Write the brief in {language}. Output only the brief: plain text, at most 220 words, these labelled lines:
 Question: the user's question, verbatim.
 Goal: what the user actually wants to obtain.
 Deliverable: the concrete output. When the user asks to find, choose or compare people, professionals,
@@ -47,8 +47,10 @@ Key criteria: the criteria implied by the question, most important first (for ex
   specialisation, methods, experience with the specific problem, location, languages, availability,
   verifiable reputation).
 Search hints: languages and local terms to search in, place names, useful directories or registries.
-Secondary: topics to cover only briefly at the end, if at all (for example prices, reimbursement or
-  regulation), unless the user asked about them.
+Secondary: topics the agent must NOT research separately (for example prices, reimbursement or
+  regulation, unless the user asked about them); the report mentions them only in one short closing
+  paragraph, using what it found anyway.
+Report shape: the deliverable comes first and is the largest part; background and method take a few lines.
 Do not answer the question and do not invent facts."""
 
 
