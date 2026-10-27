@@ -699,7 +699,7 @@ class FastPipelineTests(unittest.TestCase):
                 mock.patch.object(self.fast, "_ddg_text", side_effect=RuntimeError("down")):
             self.assertEqual(BraveSearch("breve").search(max_results=5), [])
 
-    def test_ddg_uses_duckduckgo_backend_retries_once_and_drops_ads(self):
+    def test_ddg_alternates_configurations_and_drops_ads(self):
         from unittest import mock
         calls = []
 
@@ -708,13 +708,23 @@ class FastPipelineTests(unittest.TestCase):
                 calls.append(kwargs)
                 if len(calls) == 1:
                     raise RuntimeError("DNSError wt.wikipedia.org")
+                if len(calls) == 2:
+                    return [{"href": "https://www.bing.com/aclick?x=1", "title": "ad"}]
                 return [{"href": "https://www.bing.com/aclick?x=1", "title": "ad"},
                         {"href": "https://real.example/", "title": "ok"}]
-        with mock.patch("ddgs.DDGS", FakeDDGS), mock.patch.object(self.fast.time, "sleep"):
+        with mock.patch("ddgs.DDGS", FakeDDGS), mock.patch.object(self.fast.time, "sleep") as sleep:
             items = self.fast._ddg_text("q", 6)
         self.assertEqual([i["href"] for i in items], ["https://real.example/"])
-        self.assertEqual(calls[0], {"region": "wt-wt", "backend": "duckduckgo", "max_results": 6})
-        self.assertEqual(len(calls), 2)
+        self.assertEqual([(c["region"], c["backend"]) for c in calls],
+                         [("wt-wt", "duckduckgo"), ("us-en", "auto"), ("wt-wt", "duckduckgo")])
+        sleep.assert_called_once()
+
+        class Down:
+            def text(self, query, **kwargs):
+                raise RuntimeError("No results found.")
+        with mock.patch("ddgs.DDGS", Down), mock.patch.object(self.fast.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "No results"):
+                self.fast._ddg_text("q", 6)
 
     def test_only_public_hosts(self):
         is_public = self.fast.is_public

@@ -186,22 +186,29 @@ async def brave(client, key, query, count):
 
 
 AD_HOSTS = ("bing.com", "duckduckgo.com")
+# Free scrapers fail often ("No results" when rate-limited, a Wikipedia backend that fails the whole
+# call for region wt-wt): alternate two configurations, a few seconds at most.
+DDG_ATTEMPTS = (("wt-wt", "duckduckgo"), ("us-en", "auto"), ("wt-wt", "duckduckgo"))
 
 
 def _ddg_text(query, count):
-    """ddgs with the duckduckgo backend only: "auto" adds Bing ads and a Wikipedia backend that fails
-    the whole call (wt.wikipedia.org does not exist for region wt-wt). One retry, ads dropped."""
+    """Best-effort DuckDuckGo results with ad links dropped; raises the last error if every attempt fails."""
     from ddgs import DDGS
-    for attempt in range(2):
+    error = None
+    for attempt, (region, backend) in enumerate(DDG_ATTEMPTS):
+        if attempt == len(DDG_ATTEMPTS) - 1:
+            time.sleep(1.5)
         try:
-            items = DDGS().text(query, region="wt-wt", backend="duckduckgo", max_results=count) or []
-        except Exception:
-            if attempt:
-                raise
-            time.sleep(1.0)
+            items = DDGS().text(query, region=region, backend=backend, max_results=count) or []
+        except Exception as exc:
+            error = exc
             continue
-        return [item for item in items if isinstance(item, dict)
-                and not (urlsplit(item.get("href") or "").hostname or "").endswith(AD_HOSTS)]
+        items = [item for item in items if isinstance(item, dict)
+                 and not (urlsplit(item.get("href") or "").hostname or "").endswith(AD_HOSTS)]
+        if items:
+            return items
+    if error is not None:
+        raise error
     return []
 
 
