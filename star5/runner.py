@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .tokens import metered
+
 LOG = logging.getLogger("star5")
 
 LANGS = {"it": "italian", "fr": "french", "en": "english", "de": "german", "es": "spanish", "nl": "dutch"}
@@ -165,6 +167,7 @@ class Runner:
         self.clock = clock
         self.jobs = {}
         self.slots = {"research": asyncio.Semaphore(research_slots), "chat": asyncio.Semaphore(chat_slots)}
+        self.tick_every = 3
 
     def start(self, turn_id):
         self._forget_old()
@@ -188,30 +191,44 @@ class Runner:
     async def _run(self, job):
         turn = self.store.turn(job.turn_id)
         status, fields = "error", {}
-        try:
-            async with self.slots[turn["kind"]]:
-                self.store.update_turn(job.turn_id, status="running", started=self.clock())
-                await job.emit({"t": "status", "status": "running"})
-                config = self.configs[turn["lang"]]
-                if turn["kind"] == "chat":
-                    fields = await self._chat(turn, config)
-                else:
-                    await job.emit({"t": "phase", "phase": "plan"})
-                    fields = await self._research(job, turn, config)
-                status = "done"
-        except asyncio.CancelledError:
-            status, fields = "cancelled", {"error": "cancelled"}
-        except Exception as error:
-            LOG.exception("Star5 turn %s failed", job.turn_id)
-            status, fields = "error", {"error": f"{type(error).__name__}: {error}"[:500]}
-        finally:
-            self.store.update_turn(job.turn_id, status=status, finished=self.clock(), **fields)
-            final = self.store.turn(job.turn_id)
-            async with job.cond:
-                job.events.append({"t": "done", "turn": final})
-                job.done = True
-                job.finished_at = self.clock()
-                job.cond.notify_all()
+        with metered() as meter:
+            ticker = asyncio.create_task(self._tick(job, meter, self.tick_every))
+            try:
+                async with self.slots[turn["kind"]]:
+                    self.store.update_turn(job.turn_id, status="running", started=self.clock())
+                    await job.emit({"t": "status", "status": "running"})
+                    config = self.configs[turn["lang"]]
+                    if turn["kind"] == "chat":
+                        fields = await self._chat(turn, config)
+                    else:
+                        await job.emit({"t": "phase", "phase": "plan"})
+                        fields = await self._research(job, turn, config)
+                    status = "done"
+            except asyncio.CancelledError:
+                status, fields = "cancelled", {"error": "cancelled"}
+            except Exception as error:
+                LOG.exception("Star5 turn %s failed", job.turn_id)
+                status, fields = "error", {"error": f"{type(error).__name__}: {error}"[:500]}
+            finally:
+                ticker.cancel()
+                self.store.update_turn(job.turn_id, status=status, finished=self.clock(),
+                                       **fields, **meter.snapshot())
+                final = self.store.turn(job.turn_id)
+                async with job.cond:
+                    job.events.append({"t": "done", "turn": final})
+                    job.done = True
+                    job.finished_at = self.clock()
+                    job.cond.notify_all()
+
+    async def _tick(self, job, meter, every=3):
+        """Live token counter while the job runs: one event whenever the totals change."""
+        last = None
+        while True:
+            await asyncio.sleep(every)
+            current = meter.snapshot()
+            if current != last and current["llm_calls"]:
+                last = current
+                await job.emit({"t": "tokens", **current})
 
     async def _research(self, job, turn, config):
         previous = [t for t in self.store.history(turn["thread_id"], turn["seq"]) if t["kind"] == "research"]

@@ -54,6 +54,9 @@ class Store:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
             if "brief" not in columns:
                 conn.execute("ALTER TABLE turns ADD COLUMN brief TEXT NOT NULL DEFAULT ''")
+            for name in ("tokens_in", "tokens_out", "llm_calls"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE turns ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -98,7 +101,8 @@ class Store:
         return turn_id
 
     def update_turn(self, turn_id, **fields):
-        allowed = {"status", "answer", "sources", "files", "error", "started", "finished", "lang", "brief"}
+        allowed = {"status", "answer", "sources", "files", "error", "started", "finished", "lang", "brief",
+                   "tokens_in", "tokens_out", "llm_calls"}
         if not fields or set(fields) - allowed:
             raise ValueError("Invalid turn fields")
         values = {k: json.dumps(v, ensure_ascii=False) if k in ("sources", "files") else v
@@ -121,7 +125,8 @@ class Store:
                 return None
             turns = [self._turn(r) for r in conn.execute(
                 "SELECT * FROM turns WHERE thread_id=? ORDER BY seq", (thread_id,))]
-        return {**dict(row), "turns": turns}
+        totals = {key: sum(t[key] for t in turns) for key in ("tokens_in", "tokens_out", "llm_calls")}
+        return {**dict(row), "turns": turns, **totals}
 
     def threads(self, limit=200):
         with self.connect() as conn:

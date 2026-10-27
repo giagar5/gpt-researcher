@@ -203,6 +203,7 @@
   function renderThread() {
     const root = $("#turns");
     root.replaceChildren(...state.thread.turns.map((t, i) => renderTurn(t, i === 0)));
+    renderTotal();
   }
 
   /* ---------- a turn: question, progress, sources, answer, actions ---------- */
@@ -228,6 +229,13 @@
     const when = new Date((turn.finished || turn.created) * 1000);
     meta.append(el("span", "", when.toLocaleString(state.ui, {dateStyle: "medium", timeStyle: "short"})));
     if (turn.started && turn.finished) meta.append(el("span", "", duration(turn.finished - turn.started)));
+    const usage = running && live.tokens ? live.tokens : turn;
+    if (usage.llm_calls) {
+      const total = (usage.tokens_in || 0) + (usage.tokens_out || 0);
+      const chip = el("span", "tok", T.tokens(compact(total)));
+      chip.title = T.tokensTip(full(usage.tokens_in), full(usage.tokens_out), usage.llm_calls);
+      meta.append(chip);
+    }
     const brief = $(".brief", node), briefText = turn.brief || live.brief || "";
     brief.hidden = !briefText;
     $("p", brief).textContent = briefText;
@@ -246,6 +254,22 @@
     renderActions(node, turn, first, running);
   }
   function duration(s) { s = Math.max(0, Math.round(s)); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`; }
+  const compact = n => new Intl.NumberFormat(state.ui, {notation: "compact", maximumFractionDigits: 1}).format(n || 0);
+  const full = n => new Intl.NumberFormat(state.ui).format(n || 0);
+  function renderTotal() {
+    const box = $("#threadTotal");
+    if (!state.thread) { box.hidden = true; return; }
+    let input = 0, output = 0, calls = 0;
+    state.thread.turns.forEach(t => {
+      const live = active(t) && state.live.get(t.id)?.tokens;
+      const u = live || t;
+      input += u.tokens_in || 0; output += u.tokens_out || 0; calls += u.llm_calls || 0;
+    });
+    box.hidden = !calls;
+    if (!calls) return;
+    box.textContent = T.convTotal(compact(input + output), compact(input), compact(output));
+    box.title = T.tokensTip(full(input), full(output), calls);
+  }
 
   function renderProgress(node, turn, live, running) {
     const box = $(".progress", node); box.hidden = !running;
@@ -409,6 +433,7 @@
         case "status": setTurn(turnId, {status: event.status}); fillStart(turnId); break;
         case "phase": live.phase = event.phase; break;
         case "brief": live.brief = event.text; setTurn(turnId, {brief: event.text}); break;
+        case "tokens": live.tokens = {tokens_in: event.tokens_in, tokens_out: event.tokens_out, llm_calls: event.llm_calls}; break;
         case "queries": live.queries = event.items; break;
         case "query": live.current = event.q; if (!live.queries.includes(event.q)) live.queries.push(event.q); break;
         case "source": if (!live.sources.some(s => s.url === event.url)) live.sources.push({url: event.url, domain: event.domain, title: ""}); break;
@@ -441,6 +466,7 @@
     const index = state.thread.turns.findIndex(t => t.id === id);
     const node = document.querySelector(`.turn[data-id="${id}"]`);
     if (index >= 0 && node) fillTurn(node, state.thread.turns[index], index === 0);
+    renderTotal();
   }
 
   /* ---------- asking ---------- */

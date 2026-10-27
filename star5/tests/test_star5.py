@@ -16,6 +16,16 @@ import star5.web as web
 from star5.runner import build_sources, detect_lang, normalize
 from star5.store import Store
 from star5.web import drop_event_logs, install
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+
+
+async def fake_model_call(input_tokens, output_tokens):
+    """A real LangChain call, made from a child task as GPT Researcher does."""
+    message = AIMessage(content="ok", usage_metadata={"input_tokens": input_tokens, "output_tokens": output_tokens,
+                                                       "total_tokens": input_tokens + output_tokens})
+    model = GenericFakeChatModel(messages=iter([message]))
+    await asyncio.create_task(model.ainvoke("hi"))
 
 H = {"X-Star5": "1"}
 SCHEMA_BEFORE_BRIEF = """
@@ -51,6 +61,9 @@ class Fakes:
                               "output": "\n🔍 Running research for 'query uno'..."})
         await sink.send_json({"type": "logs", "content": "added_source_url",
                               "output": "✅ Added source url to research: https://www.sqlite.org/wal.html\n"})
+        await fake_model_call(1000, 200)
+        await fake_model_call(500, 100)
+        await asyncio.sleep(0.15)
         if self.gate is not None:
             await self.gate.wait()
         await sink.send_json({"type": "report", "output": "# Titolo\n"})
@@ -62,6 +75,7 @@ class Fakes:
 
     async def chat(self, report, messages, config_path):
         self.chats.append({"report": report, "messages": messages})
+        await fake_model_call(300, 50)
         return "Risposta dal rapporto.", [{"url": "https://brave.example/r", "title": "R"}]
 
 
@@ -106,6 +120,7 @@ class Star5Case(unittest.TestCase):
         web.OUTPUTS = (Path(self.tmp.name) / "outputs").resolve()
         self.runner = install(self.app, data_dir=Path(self.tmp.name) / "data", base_config=str(base),
                               research_fn=self.fakes.research, chat_fn=self.fakes.chat, brief_fn=self.fakes.brief)
+        self.runner.tick_every = 0.02
         self.client = TestClient(self.app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
@@ -173,6 +188,10 @@ class ApiTests(Star5Case):
         self.assertEqual(self.fakes.briefs[0]["language"], "italian")
         self.assertIn({"t": "brief", "text": self.fakes.calls[0]["task"]}, events)
         self.assertEqual(done["brief"], self.fakes.calls[0]["task"])
+        self.assertEqual((done["tokens_in"], done["tokens_out"], done["llm_calls"]), (1500, 300, 2))
+        live = [e for e in events if e["t"] == "tokens"]
+        self.assertTrue(live, "no live token event")
+        self.assertEqual(live[-1], {"t": "tokens", "tokens_in": 1500, "tokens_out": 300, "llm_calls": 2})
         thread = self.client.get(f"/api/s5/threads/{started['thread']}").json()
         self.assertEqual(thread["turns"][0]["files"], {"md": "outputs/t1.md"})
         listing = self.client.get("/api/s5/threads").json()["threads"]
@@ -213,6 +232,9 @@ class ApiTests(Star5Case):
         self.assertIn("sqlite.org/wal.html", last["report"])
         self.assertEqual([m["role"] for m in last["messages"]], ["user", "assistant", "user"])
         self.assertIn("Riassumi", last["messages"][-1]["content"])
+        self.assertEqual((done["tokens_in"], done["tokens_out"], done["llm_calls"]), (300, 50, 1))
+        thread = self.client.get(f"/api/s5/threads/{started['thread']}").json()
+        self.assertEqual((thread["tokens_in"], thread["tokens_out"], thread["llm_calls"]), (2100, 400, 4))
 
     def test_follow_up_research_carries_previous_question(self):
         started = self.start()
@@ -292,8 +314,26 @@ class UnitTests(unittest.TestCase):
             old.close()
             store = Store(path)
             self.assertEqual(store.turn("u")["brief"], "")
+            self.assertEqual((store.turn("u")["tokens_in"], store.turn("u")["llm_calls"]), (0, 0))
             store.update_turn("u", brief="b")
             self.assertEqual(store.turn("u")["brief"], "b")
+
+    def test_concurrent_meters_do_not_mix(self):
+        from star5.tokens import metered
+
+        async def job(i, o):
+            with metered() as meter:
+                await fake_model_call(i, o)
+                await asyncio.sleep(0.01)
+                await fake_model_call(i, o)
+                return meter.snapshot()
+
+        async def both():
+            return await asyncio.gather(job(10, 1), job(1000, 100))
+
+        first, second = asyncio.run(both())
+        self.assertEqual(first, {"tokens_in": 20, "tokens_out": 2, "llm_calls": 2})
+        self.assertEqual(second, {"tokens_in": 2000, "tokens_out": 200, "llm_calls": 2})
 
     def test_normalize_ignores_images_and_unknown(self):
         self.assertEqual(normalize({"type": "images", "output": "[]"}), [])
