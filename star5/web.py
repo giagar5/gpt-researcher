@@ -1,6 +1,8 @@
 """Star5 routes: the new UI on "/" and a small thread API under /api/s5.
 
-Authentication stays in front of the app (nginx auth_request with the owners' Google login).
+The upstream web UI and its HTTP/WebSocket API are removed: only Star5 routes and the report
+downloads under /outputs stay. Authentication stays in front of the app (nginx auth_request with
+the owners' Google login).
 """
 
 import json
@@ -8,6 +10,7 @@ import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -15,6 +18,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Mount
 
 from .runner import LANGS, MODES, MAX_QUESTION, TONES, UI_LANGS, Runner, detect_lang, language_configs
 from .store import Store
@@ -32,14 +36,28 @@ async def research(task, report_type, tone, max_results, config_path, sink):
     from server.server_utils import generate_report_files, sanitize_filename
     from server.websocket_manager import run_agent
 
-    report, researcher = await run_agent(
-        task, report_type, "web", [], [], Tone[tone], sink, headers={}, query_domains=[],
-        config_path=config_path, return_researcher=True, max_search_results=max_results)
+    started = time.time()
+    try:
+        report, researcher = await run_agent(
+            task, report_type, "web", [], [], Tone[tone], sink, headers={}, query_domains=[],
+            config_path=config_path, return_researcher=True, max_search_results=max_results)
+    finally:
+        drop_event_logs(sanitize_filename(f"task_0_{task}").rsplit("_", 1)[-1], started)
     report = str(report)
     files = await generate_report_files(report, sanitize_filename(f"task_{int(time.time())}_{task[:80]}"))
     sources = [{"url": s.get("url"), "title": s.get("title")} for s in researcher.get_research_sources()
                if isinstance(s, dict)]
     return report, sources, list(researcher.visited_urls), {k: v for k, v in files.items() if v}
+
+
+def drop_event_logs(task_hash, since):
+    """run_agent always writes outputs/task_<time>_<hash>.json for the upstream UI; nothing reads it here."""
+    for path in OUTPUTS.glob(f"task_*_{task_hash}.json"):
+        try:
+            if path.stat().st_mtime >= since - 5:
+                path.unlink()
+        except OSError:
+            pass
 
 
 def brave_results(query):
@@ -207,13 +225,49 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={**NO_STORE, "X-Accel-Buffering": "no"})
 
+    before = list(app.router.routes)
     app.include_router(router)
+    own = [r for r in app.router.routes if not any(r is b for b in before)]
     app.mount("/s5", StaticFiles(directory=STATIC), name="star5")
+    OUTPUTS.mkdir(exist_ok=True)
+    app.mount("/outputs", StaticFiles(directory=OUTPUTS), name="star5-outputs")
 
     async def index():
         return FileResponse(STATIC / "index.html", headers={**NO_STORE, "Content-Security-Policy": CSP})
 
-    # Take "/" ahead of the upstream page, which stays reachable at /site/index.html.
     app.router.routes.insert(0, APIRoute("/", index, methods=["GET"], include_in_schema=False))
+
+    def keep(route):
+        # FastAPI >= 0.16x adds one opaque _IncludedRouter per include_router(): match by identity.
+        if any(route is r for r in own):
+            return True
+        path = getattr(route, "path", "")
+        if path == "/":
+            return getattr(route, "endpoint", None) is index
+        if isinstance(route, Mount):
+            return path in ("/s5", "/outputs")
+        return False
+
+    def prune():
+        seen, kept = set(), []
+        for route in app.router.routes:
+            key = (type(route).__name__, getattr(route, "path", None) or id(route),
+                   tuple(sorted(getattr(route, "methods", None) or ())))
+            if keep(route) and key not in seen:
+                seen.add(key)
+                kept.append(route)
+        app.router.routes[:] = kept
+
+    # Upstream adds /site, /static and /outputs again while starting up: prune after its lifespan too.
+    upstream_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async with upstream_lifespan(application) as state:
+            prune()
+            yield state
+
+    app.router.lifespan_context = lifespan
+    prune()
     app.state.star5 = runner
     return runner

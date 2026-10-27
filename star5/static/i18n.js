@@ -2,7 +2,7 @@
 window.I18N = {
   it: {
     new: "Nuova ricerca", library: "Cronologia", searchLib: "Cerca nella cronologia", noThreads: "Nessuna ricerca ancora",
-    uiLanguage: "Lingua dell'interfaccia", classic: "Interfaccia originale", menu: "Menu", close: "Chiudi",
+    uiLanguage: "Lingua dell'interfaccia", menu: "Menu", close: "Chiudi",
     hero: "Cosa vuoi sapere?", placeholder: "Chiedi qualsiasi cosa…", search: "Cerca", send: "Invia", mode: "Modalità",
     options: "Opzioni", answerLang: "Lingua della risposta", tone: "Stile", sites: "Siti letti per ogni ricerca",
     langAuto: "Automatica (lingua della domanda)",
@@ -36,7 +36,7 @@ window.I18N = {
   },
   fr: {
     new: "Nouvelle recherche", library: "Historique", searchLib: "Rechercher dans l'historique", noThreads: "Aucune recherche pour l'instant",
-    uiLanguage: "Langue de l'interface", classic: "Interface d'origine", menu: "Menu", close: "Fermer",
+    uiLanguage: "Langue de l'interface", menu: "Menu", close: "Fermer",
     hero: "Que voulez-vous savoir ?", placeholder: "Posez n'importe quelle question…", search: "Rechercher", send: "Envoyer", mode: "Mode",
     options: "Options", answerLang: "Langue de la réponse", tone: "Style", sites: "Sites lus par recherche",
     langAuto: "Automatique (langue de la question)",
@@ -70,7 +70,7 @@ window.I18N = {
   },
   en: {
     new: "New search", library: "History", searchLib: "Search history", noThreads: "No searches yet",
-    uiLanguage: "Interface language", classic: "Original interface", menu: "Menu", close: "Close",
+    uiLanguage: "Interface language", menu: "Menu", close: "Close",
     hero: "What do you want to know?", placeholder: "Ask anything…", search: "Search", send: "Send", mode: "Mode",
     options: "Options", answerLang: "Answer language", tone: "Style", sites: "Sites read per search",
     langAuto: "Automatic (question language)",

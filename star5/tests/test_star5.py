@@ -2,16 +2,20 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
+import star5.web as web
 from star5.runner import build_sources, detect_lang, normalize
 from star5.store import Store
-from star5.web import install
+from star5.web import drop_event_logs, install
 
 H = {"X-Star5": "1"}
 
@@ -55,13 +59,34 @@ class Star5Case(unittest.TestCase):
         base = Path(self.tmp.name) / "config.json"
         base.write_text(json.dumps({"LANGUAGE": "italian", "MAX_SEARCH_RESULTS_PER_QUERY": 8}))
         self.fakes = Fakes()
-        self.app = FastAPI()
+        site = Path(self.tmp.name) / "site"
+        site.mkdir()
+        (site / "index.html").write_text("OLD UI")
+
+        @asynccontextmanager
+        async def upstream_lifespan(app):
+            app.mount("/site", StaticFiles(directory=site), name="frontend")
+            app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
+            yield
+
+        Path("outputs").mkdir()
+        self.app = FastAPI(lifespan=upstream_lifespan)
+        self.app.mount("/static", StaticFiles(directory=site), name="static")
 
         @self.app.get("/", response_class=HTMLResponse)
         async def upstream():
             return "UPSTREAM"
 
+        @self.app.get("/api/reports")
+        async def reports():
+            return {"reports": []}
+
+        @self.app.websocket("/ws")
+        async def ws(socket: WebSocket):
+            await socket.accept()
+
         import star5.web as web
+        self.addCleanup(setattr, web, "OUTPUTS", web.OUTPUTS)
         web.OUTPUTS = (Path(self.tmp.name) / "outputs").resolve()
         self.runner = install(self.app, data_dir=Path(self.tmp.name) / "data", base_config=str(base),
                               research_fn=self.fakes.research, chat_fn=self.fakes.chat)
@@ -93,8 +118,20 @@ class ApiTests(Star5Case):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("UPSTREAM", response.text)
+        self.assertNotIn("/site/", response.text)
         self.assertIn("script-src 'self'", response.headers["content-security-policy"])
-        self.assertEqual(self.client.get("/s5/app.js").status_code, 200)
+        for asset in ("/s5/app.js", "/s5/vendor/showdown.min.js", "/s5/vendor/purify.min.js"):
+            self.assertEqual(self.client.get(asset).status_code, 200, asset)
+
+    def test_old_ui_and_its_api_are_gone_after_startup(self):
+        for path in ("/site/index.html", "/static/index.html", "/api/reports", "/ws", "/docs", "/openapi.json"):
+            self.assertEqual(self.client.get(path).status_code, 404, path)
+        Path("outputs/report.md").write_text("ok")
+        self.assertEqual(self.client.get("/outputs/report.md").text, "ok")
+        paths = [getattr(r, "path", "") for r in self.app.router.routes]
+        self.assertEqual(paths.count("/outputs"), 1)
+        self.assertEqual(paths.count("/"), 1)
+        self.assertEqual(self.client.get("/api/s5/config").status_code, 200)
 
     def test_research_runs_in_background_and_streams_progress(self):
         started = self.start(mode="detailed", tone="Critical", max_results=10)
@@ -226,6 +263,25 @@ class UnitTests(unittest.TestCase):
     def test_detect_lang_fallback(self):
         self.assertEqual(detect_lang("ok", "fr"), "fr")
         self.assertEqual(detect_lang("Quali sono i vantaggi della modalità WAL in SQLite?", "en"), "it")
+
+    def test_drop_event_logs_only_removes_this_runs_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = web.OUTPUTS
+            web.OUTPUTS = Path(tmp)
+            try:
+                since = time.time()
+                mine, other, report = (Path(tmp) / "task_1_abc.json", Path(tmp) / "task_1_zzz.json",
+                                       Path(tmp) / "task_1_abc.md")
+                for path in (mine, other, report):
+                    path.write_text("x")
+                earlier = Path(tmp) / "task_0_abc.json"
+                earlier.write_text("x")
+                os.utime(earlier, (since - 3600, since - 3600))
+                drop_event_logs("abc", since)
+                self.assertFalse(mine.exists())
+                self.assertTrue(other.exists() and report.exists() and earlier.exists())
+            finally:
+                web.OUTPUTS = old
 
 
 if __name__ == "__main__":
