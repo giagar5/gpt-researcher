@@ -258,8 +258,8 @@ def install_gpt_researcher():
 
     def search(self, max_results=7):
         results = search_all(self.query, max_results)
-        # Cap the merged list so three engines do not triple the pages to scrape.
-        results = results[:max(4, int(max_results) * 2)]
+        # Cap the merged list so three engines do not triple the pages to scrape (Standard stays ~3 min).
+        results = results[:max(4, int(max_results) * 3 // 2)]
         active = current()
         if active:
             active.stats.mark_used(results)

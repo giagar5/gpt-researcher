@@ -811,10 +811,10 @@ class EngineTests(unittest.TestCase):
         with self.fake_engines(behaviour), self.engines.session("quick") as active:
             results = BraveSearch("breve").search(max_results=3)
             summary = active.stats.summary()
-        self.assertEqual(len(results), 6, "merged list capped at twice the per-engine count")
+        self.assertEqual(len(results), 4, "merged list capped at 1.5 times the per-engine count (minimum 4)")
         self.assertEqual(results[0], {"href": "https://a.example/", "title": "brave", "body": "brave snippet"})
         self.assertEqual(results[1]["body"], "bing snippet"[:100])
-        self.assertEqual(summary["duckduckgo"]["used"], 4)
+        self.assertEqual(summary["duckduckgo"]["used"], 2)
 
 class EffortTests(Star5Case):
     def test_effort_reaches_brief_research_and_nested_tasks_then_follow_up_chat(self):

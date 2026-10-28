@@ -76,7 +76,7 @@ on the mode:
 
 An engine that is late or fails is simply left out of that query. Results are merged one per
 engine at a time, deduplicated, and keep the list of engines that found them. Standard and
-Approfondita use at most twice the per-engine count per query, so three engines do not
+Approfondita use at most 1.5 times the per-engine count per query, so three engines do not
 triple the pages to read.
 ## Privacy and security
 
