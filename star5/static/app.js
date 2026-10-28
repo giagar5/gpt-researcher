@@ -347,6 +347,19 @@
     const a = el("span", `av c${h % 6}`, (domain.replace(/^www\./, "")[0] || "?")); a.setAttribute("aria-hidden", "true");
     return a;
   }
+  const ENGINE_NAMES = {brave: "Brave", bing: "Bing", duckduckgo: "DuckDuckGo"};
+  function renderEngines(root, stats) {
+    const names = Object.keys(ENGINE_NAMES).filter(n => stats[n]);
+    root.hidden = !names.length;
+    root.replaceChildren(...names.map(n => {
+      const s = stats[n], chip = el("span", "eng");
+      chip.append(el("i", `edot e-${n}`), el("b", "", ENGINE_NAMES[n]), el("span", "", T.engineUsed(s.used)));
+      const problems = (s.timeouts ? ` · ${T.engineTimeouts(s.timeouts)}` : "") + (s.errors ? ` · ${T.engineErrors(s.errors)}` : "");
+      if (problems || !s.used) chip.classList.add("warn");
+      chip.title = `${ENGINE_NAMES[n]}: ${T.engineTip(s.used, s.read, s.cited, s.queries)}${problems}`;
+      return chip;
+    }));
+  }
   function renderSources(node, sources, turn) {
     const box = $(".sources", node); box.hidden = !sources.length;
     if (!sources.length) return;
@@ -355,12 +368,18 @@
     const cited = sources.filter(s => s.cited);
     const number = new Map(cited.map((s, i) => [s.url, i + 1]));
     const cards = $(".cards", box), grouped = $(".grouped", box), toggle = $(".all", box);
+    renderEngines($(".engines", box), turn.engines || {});
     cards.replaceChildren(...sources.slice(0, 40).map(s => {
       const a = el("a", "card"); a.href = s.url; a.target = "_blank"; a.rel = "noopener noreferrer";
-      a.title = s.url;
+      a.title = s.engines && s.engines.length ? `${s.url}\n${T.foundBy}: ${s.engines.map(e => ENGINE_NAMES[e] || e).join(", ")}` : s.url;
       a.append(el("span", "ct", s.title || s.url.replace(/^https?:\/\//, "")));
       const d = el("span", "cd"); d.append(avatar(s.domain || ""), el("span", "dn", s.domain || ""));
       if (isOfficial(s.domain || "")) { const b = el("span", "badge", T.official); b.title = T.officialTip; d.append(b); }
+      if (s.engines && s.engines.length) {
+        const dots = el("span", "edots");
+        s.engines.forEach(e => dots.append(el("i", `edot e-${e}`)));
+        d.append(dots);
+      }
       if (number.has(s.url)) d.append(el("span", "num", String(number.get(s.url))));
       a.append(d);
       return a;

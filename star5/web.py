@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Mount
 
 from .effort import EFFORTS, install as install_effort
-from .fast import fast_research, install_brave_guard
+from . import engines
+from .fast import fast_research
 from .media import Geocoder, process as process_media
 from .runner import LANGS, MODES, MAX_QUESTION, TONES, UI_LANGS, Runner, detect_lang, language_configs
 from .store import Store
@@ -125,14 +126,13 @@ def drop_event_logs(task_hash, since):
             pass
 
 
-def brave_results(query):
-    """Web search for the report chat: Brave instead of the upstream Tavily-only tool."""
-    if not os.environ.get("BRAVE_API_KEY"):
-        return {"error": "Web search is not configured", "results": []}
-    from gpt_researcher.retrievers import BraveSearch
-    hits = BraveSearch(query).search(max_results=5)
-    return {"results": [{"title": h.get("title", ""), "url": h.get("href", ""), "content": h.get("body", "")}
-                        for h in hits]}
+def web_results(query):
+    """Web search for the report chat: Brave, Bing and DuckDuckGo instead of the upstream Tavily-only tool."""
+    hits = engines.search_all(query, 5)[:8]
+    active = engines.current()
+    if active:
+        active.stats.mark_used(hits)
+    return {"results": [{"title": h["title"], "url": h["url"], "content": h["snippet"]} for h in hits]}
 
 
 async def chat(report, messages, config_path):
@@ -141,7 +141,7 @@ async def chat(report, messages, config_path):
     class Star5Chat(ChatAgentWithMemory):
         def quick_search(self, query):
             try:
-                results = brave_results(query)
+                results = web_results(query)
             except Exception as error:
                 results = {"error": str(error), "results": []}
             self.search_metadata = self._build_search_metadata(query, results)
@@ -190,7 +190,7 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     data_dir = Path(data_dir or os.environ.get("STAR5_DATA", "data"))
     base_config = base_config or os.environ.get("CONFIG_PATH")
     install_effort()
-    install_brave_guard()
+    engines.install_gpt_researcher()
     configs = language_configs(base_config, data_dir / "configs")
     default_results = json.loads(Path(base_config).read_text(encoding="utf-8")).get("MAX_SEARCH_RESULTS_PER_QUERY", 8)
     store = Store(data_dir / "star5.db")
@@ -241,7 +241,8 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
     @router.get("/config")
     async def config():
         return {"modes": list(MODES), "tones": list(TONES), "langs": list(LANGS), "ui": list(UI_LANGS),
-                "efforts": list(EFFORTS), "max_results": default_results}
+                "efforts": list(EFFORTS), "max_results": default_results,
+                "engines": list(engines.ENGINES), "engine_timeouts": engines.MODE_TIMEOUTS}
 
     @router.get("/threads")
     async def threads():

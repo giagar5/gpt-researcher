@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 
 import star5.web as web
-from star5 import effort
+from star5 import effort, engines
 from star5.runner import build_sources, detect_lang, normalize
 from star5.store import Store
 from star5.web import drop_event_logs, install
@@ -52,6 +52,7 @@ class Fakes:
         self.geocoded = []
         self.efforts = []
         self.fast_calls = []
+        self.timeouts = []
 
     async def brief(self, question, language, previous, config_path, extra=""):
         self.briefs.append({"question": question, "language": language, "previous": previous, "extra": extra})
@@ -104,6 +105,13 @@ class Fakes:
         self.fast_calls.append({"question": question, "language": language, "earlier": earlier, "extra": extra,
                                 "files": files_text, "location": location, "max": max_results})
         self.efforts.append(("fast", effort.current()))
+        active = engines.current()
+        self.timeouts.append(active.timeout)
+        hit = {"url": "https://phimai.example/", "title": "Phimai", "snippet": "", "age": ""}
+        active.stats.record("brave", "ok", [hit])
+        active.stats.record("bing", "ok", [hit])
+        active.stats.record("duckduckgo", "timeouts")
+        active.stats.mark_used([hit])
         await sink.send_json({"type": "logs", "content": "subqueries", "output": "plan", "metadata": ["thai Wavre"]})
         await sink.send_json({"type": "logs", "content": "running_subquery_research",
                               "output": "🔍 Running research for 'thai Wavre'..."})
@@ -517,9 +525,14 @@ class FastModeTests(Star5Case):
         phases = [e["phase"] for e in events if e["t"] == "phase"]
         self.assertEqual(phases, ["plan", "search", "read", "write"])
         self.assertIn({"t": "queries", "items": ["thai Wavre"]}, events)
-        self.assertEqual(done["sources"][0], {"url": "https://phimai.example/", "title": "Phimai",
-                                              "domain": "phimai.example", "cited": True})
+        self.assertEqual({k: done["sources"][0][k] for k in ("url", "title", "domain", "cited")},
+                         {"url": "https://phimai.example/", "title": "Phimai", "domain": "phimai.example", "cited": True})
         self.assertEqual((done["tokens_in"], done["tokens_out"], done["llm_calls"]), (400, 90, 1))
+        self.assertEqual(self.fakes.timeouts, [engines.MODE_TIMEOUTS["fast"]])
+        self.assertEqual(done["sources"][0]["engines"], ["brave", "bing"])
+        self.assertEqual(done["engines"]["brave"], {"used": 1, "read": 1, "cited": 1, "queries": 1, "timeouts": 0, "errors": 0})
+        self.assertEqual(done["engines"]["duckduckgo"]["timeouts"], 1)
+        self.assertEqual(self.client.get(f"/api/s5/threads/{started['thread']}").json()["turns"][0]["engines"], done["engines"])
 
     def test_explicit_effort_wins_and_follow_up_web_search_keeps_context(self):
         started = self.start("Prima domanda sulle pompe di calore in Belgio", mode="fast", effort="high")
@@ -552,9 +565,7 @@ class FastPipelineTests(unittest.TestCase):
         from star5 import fast
         self.fast, self.httpx = fast, httpx
         self.events = []
-        self.requests = []
-        os.environ["BRAVE_API_KEY"] = "unit-test-brave"
-        self.addCleanup(os.environ.pop, "BRAVE_API_KEY", None)
+        self.searched = []
 
     class Sink:
         def __init__(self, events):
@@ -563,17 +574,8 @@ class FastPipelineTests(unittest.TestCase):
         async def send_json(self, data):
             self.events.append(data)
 
-    def transport(self, pages, brave_status=None):
+    def transport(self, pages):
         async def handler(request):
-            self.requests.append(str(request.url))
-            if request.url.host == "api.search.brave.com":
-                assert request.headers["x-subscription-token"] == "unit-test-brave"
-                status = brave_status.pop(0) if brave_status else 200
-                query = request.url.params["q"]
-                results = [{"url": f"https://{query.split()[0]}.example/{i}", "title": f"<strong>{query}</strong> {i}",
-                            "description": "Desc &amp; more", "extra_snippets": ["extra"]} for i in range(3)]
-                results.append({"url": "https://shared.example/", "title": "Shared", "description": "s"})
-                return self.httpx.Response(status, json={"web": {"results": results}} if status == 200 else {})
             body = pages.get(str(request.url))
             if body is None:
                 return self.httpx.Response(404)
@@ -582,6 +584,13 @@ class FastPipelineTests(unittest.TestCase):
                 return self.httpx.Response(200, text="<p>too late</p>", headers={"content-type": "text/html"})
             return self.httpx.Response(200, text=body, headers={"content-type": "text/html; charset=utf-8"})
         return self.httpx.MockTransport(handler)
+
+    def fake_search(self, query, count):
+        self.searched.append((query, count))
+        word = query.split()[0]
+        return [{"url": f"https://{word}.example/{i}", "title": f"{query} {i}", "snippet": "Desc & more",
+                 "age": "", "engines": ["brave", "bing"] if i == 0 else ["duckduckgo"]} for i in range(3)] + [
+                {"url": "https://shared.example/", "title": "Shared", "snippet": "s", "age": "", "engines": ["bing"]}]
 
     def run_fast(self, **overrides):
         captured = {}
@@ -601,8 +610,8 @@ class FastPipelineTests(unittest.TestCase):
             if request.url.host.endswith(".private"):
                 raise self.httpx.RequestError("blocked", request=request)
 
-        kwargs = dict(planner=planner, writer=writer, files_fn=files_fn, guard=guard, backup=None,
-                      transport=self.transport(overrides.pop("pages", {}), overrides.pop("brave_status", None)))
+        kwargs = dict(planner=planner, writer=writer, files_fn=files_fn, guard=guard, search=self.fake_search,
+                      transport=self.transport(overrides.pop("pages", {})))
         kwargs.update(overrides)
         out = asyncio.run(self.fast.fast_research("Domanda?", "italian", "", "", "", "", 8, "cfg",
                                                   self.Sink(self.events), **kwargs))
@@ -614,61 +623,31 @@ class FastPipelineTests(unittest.TestCase):
                  "https://beta.example/0": "<html><body><p>Beta text</p></body></html>"}
         (answer, sources, visited, files), captured = self.run_fast(pages=pages)
         self.assertEqual(answer, "Risposta [alpha](https://alpha.example/0).")
+        self.assertEqual(sorted(self.searched), [("alpha query", 8), ("beta query", 8)])
         self.assertEqual([s["url"] for s in sources][:4], ["https://alpha.example/0", "https://beta.example/0",
                                                           "https://alpha.example/1", "https://beta.example/1"])
         self.assertEqual(sum(1 for s in sources if s["url"] == "https://shared.example/"), 1, "duplicates merged")
-        self.assertEqual(sources[0]["title"], "alpha query 0", "HTML stripped from Brave titles")
         self.assertEqual(visited, ["https://alpha.example/0", "https://beta.example/0"])
         self.assertEqual(files, {"md": "outputs/x.md", "pdf": ""})
         self.assertIn("Page text:\nAlpha\nContenuto utile alpha", captured["block"])
         self.assertNotIn("menu", captured["block"])
         self.assertNotIn("x()", captured["block"])
-        self.assertIn("Snippet: Desc & more … extra", captured["block"])
         kinds = [e.get("content") or e["type"] for e in self.events]
         self.assertEqual(kinds, ["subqueries", "running_subquery_research", "running_subquery_research",
                                  "added_source_url", "added_source_url", "writing_report", "report"])
-        self.assertEqual(self.events[0]["metadata"], ["alpha query", "beta query"])
 
-    def test_brave_retry_on_429_slow_pages_and_private_hosts(self):
+    def test_slow_pages_dropped_at_the_deadline(self):
         old = self.fast.FETCH_DEADLINE
         self.fast.FETCH_DEADLINE = 0.15
         self.addCleanup(setattr, self.fast, "FETCH_DEADLINE", old)
         pages = {"https://alpha.example/0": "slow", "https://beta.example/0": "<p>ok beta</p>"}
-        (_, sources, visited, _), _ = self.run_fast(pages=pages, brave_status=[429, 200, 200])
+        (_, sources, visited, _), _ = self.run_fast(pages=pages)
         self.assertGreaterEqual(len(sources), 7)
-        self.assertEqual(visited, ["https://beta.example/0"], "slow page dropped at the deadline")
+        self.assertEqual(visited, ["https://beta.example/0"])
 
     def test_no_results_fail_clearly(self):
         with self.assertRaisesRegex(RuntimeError, "no results"):
-            self.run_fast(brave_status=[500, 500])
-
-    def test_duckduckgo_backup_when_brave_is_blocked_or_has_no_key(self):
-        used = []
-
-        async def backup(query, count):
-            used.append(query)
-            return [{"url": f"https://ddg.example/{len(used)}", "title": "DDG", "snippet": "s", "age": ""}]
-        (_, sources, _, _), _ = self.run_fast(brave_status=[402, 402], backup=backup)
-        self.assertEqual(sorted(used), ["alpha query", "beta query"])
-        self.assertEqual({s["url"] for s in sources}, {"https://ddg.example/1", "https://ddg.example/2"})
-        os.environ.pop("BRAVE_API_KEY")
-        used.clear()
-        self.requests.clear()
-        self.run_fast(backup=backup)
-        self.assertEqual(len(used), 2)
-        self.assertFalse(any("brave.com" in url for url in self.requests), "no Brave call without a key")
-
-    def test_duckduckgo_normalisation(self):
-        def fake(query, count):
-            return [{"href": "https://a.example/", "title": "<b>A</b>", "body": "corpo &amp; testo"},
-                    {"url": "ftp://x"}, "junk", {"link": "https://b.example/", "snippet": "sn"}]
-        found = asyncio.run(self.fast.duckduckgo("q", 5, search_fn=fake))
-        self.assertEqual(found, [{"url": "https://a.example/", "title": "A", "snippet": "corpo & testo", "age": ""},
-                                 {"url": "https://b.example/", "title": "", "snippet": "sn", "age": ""}])
-
-        def broken(query, count):
-            raise RuntimeError("ratelimit")
-        self.assertEqual(asyncio.run(self.fast.duckduckgo("q", 5, search_fn=broken)), [])
+            self.run_fast(search=lambda query, count: [])
 
     def test_query_helpers(self):
         fast = self.fast
@@ -681,50 +660,12 @@ class FastPipelineTests(unittest.TestCase):
         self.assertEqual(fast.parse_queries("niente json", "la domanda"), ["la domanda"])
         self.assertEqual(fast.parse_queries('{"queries": [1, null]}', "q"), ["q"])
 
-    def test_brave_guard_shortens_gpt_researcher_queries(self):
-        from gpt_researcher.retrievers.brave.brave import BraveSearch
-        self.fast.install_brave_guard()
-        self.fast.install_brave_guard()
-        search = BraveSearch("Question: Dove trovo X?\n\nGoal: " + "lungo " * 300)
-        self.assertEqual(search.query, "Dove trovo X?")
-        self.assertEqual(BraveSearch("breve").query, "breve")
-        from unittest import mock
-        backup = [{"href": "https://ddg.example/", "body": "b" * 300, "title": "t"}]
-        with mock.patch("gpt_researcher.retrievers.brave.brave.requests.get", side_effect=OSError("402")), \
-                mock.patch.object(self.fast, "_ddg_text", return_value=backup) as ddg:
-            self.assertEqual(BraveSearch("breve").search(max_results=5),
-                             [{"href": "https://ddg.example/", "body": "b" * 100, "title": "t"}])
-        ddg.assert_called_once_with("breve", 5)
-        with mock.patch("gpt_researcher.retrievers.brave.brave.requests.get", side_effect=OSError("402")), \
-                mock.patch.object(self.fast, "_ddg_text", side_effect=RuntimeError("down")):
-            self.assertEqual(BraveSearch("breve").search(max_results=5), [])
-
-    def test_ddg_alternates_configurations_and_drops_ads(self):
-        from unittest import mock
-        calls = []
-
-        class FakeDDGS:
-            def text(self, query, **kwargs):
-                calls.append(kwargs)
-                if len(calls) == 1:
-                    raise RuntimeError("DNSError wt.wikipedia.org")
-                if len(calls) == 2:
-                    return [{"href": "https://www.bing.com/aclick?x=1", "title": "ad"}]
-                return [{"href": "https://www.bing.com/aclick?x=1", "title": "ad"},
-                        {"href": "https://real.example/", "title": "ok"}]
-        with mock.patch("ddgs.DDGS", FakeDDGS), mock.patch.object(self.fast.time, "sleep") as sleep:
-            items = self.fast._ddg_text("q", 6)
-        self.assertEqual([i["href"] for i in items], ["https://real.example/"])
-        self.assertEqual([(c["region"], c["backend"]) for c in calls],
-                         [("wt-wt", "duckduckgo"), ("us-en", "auto"), ("wt-wt", "duckduckgo")])
-        sleep.assert_called_once()
-
-        class Down:
-            def text(self, query, **kwargs):
-                raise RuntimeError("No results found.")
-        with mock.patch("ddgs.DDGS", Down), mock.patch.object(self.fast.time, "sleep"):
-            with self.assertRaisesRegex(RuntimeError, "No results"):
-                self.fast._ddg_text("q", 6)
+    def test_interleave_merges_engines_of_the_same_url(self):
+        a = [{"url": "https://www.x.example/p/", "engines": ["bing"]}]
+        b = [{"url": "https://x.example/p", "engines": ["brave"]}, {"url": "https://y.example/", "engines": ["duckduckgo"]}]
+        merged = self.fast.interleave([a, b])
+        self.assertEqual([m["url"] for m in merged], ["https://www.x.example/p/", "https://y.example/"])
+        self.assertEqual(merged[0]["engines"], ["brave", "bing"])
 
     def test_only_public_hosts(self):
         is_public = self.fast.is_public
@@ -733,6 +674,147 @@ class FastPipelineTests(unittest.TestCase):
             self.assertFalse(asyncio.run(is_public(host)), host)
         self.assertTrue(asyncio.run(is_public("8.8.8.8")))
 
+
+class EngineTests(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        from star5 import engines
+        self.engines, self.mock = engines, mock
+        os.environ["BRAVE_API_KEY"] = "unit-test-brave"
+        self.addCleanup(os.environ.pop, "BRAVE_API_KEY", None)
+
+    def fake_engines(self, behaviour):
+        def make(name):
+            def run(query, count, timeout):
+                kind = behaviour[name]
+                if kind == "slow":
+                    time.sleep(timeout + 0.4)
+                    return [{"url": "https://late.example/", "title": "", "snippet": "", "age": ""}]
+                if kind == "error":
+                    raise RuntimeError("blocked")
+                return [{"url": u, "title": name, "snippet": f"{name} snippet", "age": ""} for u in kind]
+            return run
+        return self.mock.patch.dict(self.engines.ENGINE_FUNCS, {n: make(n) for n in behaviour})
+
+    def test_parallel_engines_timeout_errors_merge_and_stats(self):
+        behaviour = {"brave": ["https://a.example/", "https://b.example/"],
+                     "bing": ["https://www.a.example", "https://c.example/"], "duckduckgo": "slow"}
+        with self.fake_engines(behaviour), self.engines.session("fast") as active:
+            self.assertEqual(active.timeout, 0 + self.engines.MODE_TIMEOUTS["fast"])
+            started = time.monotonic()
+            results = self.engines.search_all("q", 5, timeout=0.3)
+            elapsed = time.monotonic() - started
+            active.stats.mark_used(results)
+            summary = active.stats.summary(["https://a.example/"], ["https://c.example/"])
+        self.assertLess(elapsed, 0.6, "the slow engine must not hold the others")
+        self.assertEqual([r["url"] for r in results], ["https://a.example/", "https://b.example/", "https://c.example/"])
+        self.assertEqual(results[0]["engines"], ["brave", "bing"])
+        self.assertEqual(summary["brave"], {"used": 2, "read": 1, "cited": 0, "queries": 1, "timeouts": 0, "errors": 0})
+        self.assertEqual(summary["bing"], {"used": 2, "read": 1, "cited": 1, "queries": 1, "timeouts": 0, "errors": 0})
+        self.assertEqual(summary["duckduckgo"], {"used": 0, "read": 0, "cited": 0, "queries": 1, "timeouts": 1,
+                                                 "errors": 0})
+        self.assertIsNone(self.engines.current())
+
+    def test_errors_and_missing_brave_key(self):
+        behaviour = {"brave": ["https://a.example/"], "bing": "error", "duckduckgo": ["https://d.example/"]}
+        stats = self.engines.Stats()
+        with self.fake_engines(behaviour):
+            self.engines.search_all("q", 5, timeout=1, stats=stats)
+            os.environ.pop("BRAVE_API_KEY")
+            results = self.engines.search_all("q", 5, timeout=1, stats=stats)
+        self.assertEqual([r["url"] for r in results], ["https://d.example/"])
+        self.assertEqual(stats.engines["bing"]["errors"], 2)
+        self.assertEqual(stats.engines["brave"]["queries"], 1, "no Brave call without a key")
+
+    def test_mode_timeouts(self):
+        timeouts = [self.engines.MODE_TIMEOUTS[m] for m in ("fast", "quick", "deep")]
+        self.assertEqual(timeouts, sorted(timeouts))
+        self.assertEqual(len(set(timeouts)), 3, "each mode has its own timeout")
+        with self.engines.session("deep") as active:
+            self.assertEqual(active.timeout, self.engines.MODE_TIMEOUTS["deep"])
+
+    def test_ddgs_engines_drop_ads_and_choose_backends(self):
+        calls = []
+
+        class FakeDDGS:
+            def __init__(self, timeout=5):
+                calls.append({"timeout": timeout})
+
+            def text(self, query, **kwargs):
+                calls[-1].update(kwargs)
+                return [{"href": "https://www.bing.com/aclick?ld=x", "title": "ad"},
+                        {"href": "https://real.example/", "title": "<b>Real</b>", "body": "a &amp; b"},
+                        {"href": "ftp://no"}, "junk"]
+        with self.mock.patch("ddgs.DDGS", FakeDDGS):
+            bing = self.engines.bing("q", 6, 4.5)
+            ddg = self.engines.duckduckgo("q", 6, 4.5)
+        self.assertEqual(bing, [{"url": "https://real.example/", "title": "Real", "snippet": "a & b", "age": ""}])
+        self.assertEqual(ddg, bing)
+        self.assertEqual((calls[0]["backend"], calls[0]["region"]), ("bing", "us-en"))
+        self.assertIn(calls[0]["timeout"], (3, 4))
+        self.assertEqual((calls[1]["backend"], calls[1]["region"]), ("duckduckgo", "wt-wt"))
+
+    def test_ddgs_second_region_when_the_first_fails(self):
+        regions = []
+
+        class Flaky:
+            def __init__(self, timeout=5):
+                pass
+
+            def text(self, query, region, **kwargs):
+                regions.append(region)
+                if len(regions) == 1:
+                    raise RuntimeError("No results found.")
+                return [{"href": "https://ok.example/", "title": "ok"}]
+
+        class Down(Flaky):
+            def text(self, query, region, **kwargs):
+                regions.append(region)
+                raise RuntimeError("No results found.")
+        with self.mock.patch("ddgs.DDGS", Flaky):
+            self.assertEqual(len(self.engines.duckduckgo("q", 5, 6)), 1)
+        self.assertEqual(regions, ["wt-wt", "us-en"])
+        regions.clear()
+        with self.mock.patch("ddgs.DDGS", Down), self.assertRaisesRegex(RuntimeError, "No results"):
+            self.engines.bing("q", 5, 6)
+        self.assertEqual(regions, ["us-en", "uk-en"])
+        regions.clear()
+
+        class SlowDown(Down):
+            def text(self, query, region, **kwargs):
+                time.sleep(0.2)
+                return super().text(query, region, **kwargs)
+        with self.mock.patch("ddgs.DDGS", SlowDown), self.assertRaises(RuntimeError):
+            self.engines.bing("q", 5, 1.6)
+        self.assertEqual(regions, ["us-en"], "no second try without enough time left")
+
+    def test_brave_parses_and_retries_429(self):
+        import httpx
+        replies = [httpx.Response(429, json={}), httpx.Response(200, json={"web": {"results": [
+            {"url": "https://a.example/", "title": "<strong>A</strong>", "description": "d", "extra_snippets": ["e"],
+             "age": "2 days"}, {"url": "javascript:x"}]}})]
+        with self.mock.patch.object(httpx, "get", side_effect=lambda *a, **k: replies.pop(0)), \
+                self.mock.patch.object(self.engines.time, "sleep"):
+            found = self.engines.brave("q", 5, 6)
+        self.assertEqual(found, [{"url": "https://a.example/", "title": "A", "snippet": "d … e", "age": "2 days"}])
+        with self.mock.patch.object(httpx, "get", return_value=httpx.Response(402, json={})):
+            with self.assertRaisesRegex(RuntimeError, "402"):
+                self.engines.brave("q", 5, 6)
+
+    def test_gpt_researcher_retriever_uses_all_engines(self):
+        from gpt_researcher.retrievers.brave.brave import BraveSearch
+        self.engines.install_gpt_researcher()
+        self.engines.install_gpt_researcher()
+        self.assertEqual(BraveSearch("Question: Dove trovo X?\n\nGoal: " + "lungo " * 300).query, "Dove trovo X?")
+        behaviour = {"brave": ["https://a.example/"], "bing": ["https://b.example/"],
+                     "duckduckgo": [f"https://d{i}.example/" for i in range(10)]}
+        with self.fake_engines(behaviour), self.engines.session("quick") as active:
+            results = BraveSearch("breve").search(max_results=3)
+            summary = active.stats.summary()
+        self.assertEqual(len(results), 6, "merged list capped at twice the per-engine count")
+        self.assertEqual(results[0], {"href": "https://a.example/", "title": "brave", "body": "brave snippet"})
+        self.assertEqual(results[1]["body"], "bing snippet"[:100])
+        self.assertEqual(summary["duckduckgo"]["used"], 4)
 
 class EffortTests(Star5Case):
     def test_effort_reaches_brief_research_and_nested_tasks_then_follow_up_chat(self):

@@ -25,7 +25,7 @@ your own server behind your own login. Your questions, history and files stay wi
 
 - **Veloce** is a purpose-built pipeline with no agent loop:
   1. A small model writes 2-3 sharp queries.
-  2. The searches run in parallel.
+  2. Every query runs on **Brave, Bing and DuckDuckGo at once**, with a timeout per engine.
   3. The best pages are read within 8 seconds.
   4. One strong model writes a concise answer with citations.
 
@@ -38,7 +38,7 @@ your own server behind your own login. Your questions, history and files stay wi
 ## What you get
 
 - **Answers with sources.** Sources appear as cards, cited sources first, and likely
-  official sites are flagged. The answer has numbered citations and a table of contents. You
+  official sites are flagged. Each card shows which engines found it, and the answer says how many sources each engine contributed (used, read, cited) and whether one timed out. The answer has numbered citations and a table of contents. You
   can download it as PDF, Word or Markdown.
 - **Conversations.** Ask follow-ups on the report ("from the report") or start a new web
   search with the previous context. The history is always visible: the latest searches are
@@ -61,6 +61,23 @@ your own server behind your own login. Your questions, history and files stay wi
 - **Multilingual.** The interface is in Italian, French and English. The answer follows the
   language of the question, or the one you choose.
 
+## Search engines
+
+Every query goes to **Brave** (official API), **Bing** and **DuckDuckGo** (both through
+[ddgs](https://pypi.org/project/ddgs/)) in parallel. Each engine has a deadline that depends
+on the mode:
+
+| Mode | Engine timeout |
+|---|---|
+| Veloce | 5 s |
+| Standard | 8 s |
+| Approfondita | 12 s |
+| Report chat | 6 s |
+
+An engine that is late or fails is simply left out of that query. Results are merged one per
+engine at a time, deduplicated, and keep the list of engines that found them. Standard and
+Approfondita use at most twice the per-engine count per query, so three engines do not
+triple the pages to read.
 ## Privacy and security
 
 - **Self-hosted.** It runs in your own container behind your own sign-in (nginx
@@ -82,7 +99,7 @@ browser ──▶ nginx (login, no-store) ──▶ FastAPI app (star5/)
                                           ├─ attachments: media worker + Whisper (separate venv)
                                           └─ SQLite: threads, turns, uploads
 models:  any OpenAI-compatible endpoint (here an Azure proxy with "fast" and "frontier" aliases)
-search:  Brave Search API, with a DuckDuckGo fallback
+search:  Brave Search API + Bing + DuckDuckGo (ddgs), in parallel, deduplicated, timeout per mode
 ```
 
 All Star5 code lives in [`star5/`](star5) and [`star5_main.py`](star5_main.py), on top of an
@@ -91,8 +108,8 @@ UI and API are not served.
 
 ## Running it
 
-Requirements: Python 3.12, an OpenAI-compatible model endpoint and a
-[Brave Search API](https://brave.com/search/api/) key.
+Requirements: Python 3.12 and an OpenAI-compatible model endpoint. A
+[Brave Search API](https://brave.com/search/api/) key is recommended; Bing and DuckDuckGo need none.
 
 ```bash
 pip install -r requirements.txt

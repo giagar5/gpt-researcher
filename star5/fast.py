@@ -1,17 +1,16 @@
 """Veloce mode: a Perplexity-style answer with sources in about 30-60 seconds.
 
-One quick planning call on the `fast` alias writes 2-3 short web queries; Brave runs them in
-parallel; the best pages are read with a hard deadline; one `frontier` call writes a concise,
+One quick planning call on the `fast` alias writes 2-3 short web queries; every query runs on
+Brave, Bing and DuckDuckGo at once (star5/engines.py); the best pages are read with a hard
+deadline; one `frontier` call writes a concise,
 cited answer (reasoning effort low unless the user chose another). No GPT Researcher agent,
 sub-topics or embeddings, which is where the standard mode spends its minutes.
 """
 
 import asyncio
-import html
 import ipaddress
 import json
 import logging
-import os
 import re
 import socket
 import time
@@ -20,19 +19,18 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import engines
 from .effort import reasoning
 
 LOG = logging.getLogger("star5")
 
-BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 USER_AGENT = "Mozilla/5.0 (compatible; Star5-Search/1.0; +https://search.star5.org)"
 PLANNER_MODEL = "fast"
 MAX_QUERIES = 3
 FETCH_DEADLINE = 8.0     # seconds for reading pages, all in parallel
 PAGE_CHARS = 3500        # text kept per page
 PAGE_BYTES = 3 * 1024 * 1024
-SNIPPET_CHARS = 700
-LISTED_RESULTS = 16      # search results shown to the writer
+LISTED_RESULTS = 24      # search results shown to the writer (all engines, deduplicated)
 BRAVE_MAX_CHARS, BRAVE_MAX_WORDS = 380, 45   # Brave answers 422 above 400 characters / 50 words
 
 PLAN_PROMPT = """You plan web searches for a research assistant. Today is {today}.
@@ -69,41 +67,6 @@ def short_query(query, chars=BRAVE_MAX_CHARS, words=BRAVE_MAX_WORDS):
     if len(out) > chars:
         out = out[:chars].rsplit(" ", 1)[0]
     return out
-
-
-def install_brave_guard():
-    """GPT Researcher's Brave retriever: short queries (its first search used the whole brief), and
-    DuckDuckGo when Brave returns nothing (usage limit, key or network errors)."""
-    try:
-        from gpt_researcher.retrievers.brave.brave import BraveSearch
-    except ImportError:  # pragma: no cover
-        return
-    if getattr(BraveSearch, "_star5_guard", False):
-        return
-    original_init, original_search = BraveSearch.__init__, BraveSearch.search
-
-    def __init__(self, query, *args, **kwargs):
-        original_init(self, short_query(query), *args, **kwargs)
-
-    def search(self, max_results=7):
-        results = original_search(self, max_results)
-        if results:
-            return results
-        try:
-            items = _ddg_text(self.query, max(3, min(int(max_results), 20)))
-        except Exception as error:
-            LOG.warning("Brave and DuckDuckGo both failed for %r: %s", self.query, error)
-            return []
-        # Same shape as GPT Researcher's Duckduckgo retriever: a short body means "scrape the page".
-        results = [{"href": item["href"], "body": (item.get("body") or "")[:100], "title": item.get("title") or ""}
-                   for item in items if item.get("href")]
-        if results:
-            LOG.warning("Brave gave nothing for %r; used DuckDuckGo", self.query)
-        return results
-
-    BraveSearch.__init__ = __init__
-    BraveSearch.search = search
-    BraveSearch._star5_guard = True
 
 
 def parse_queries(text, question):
@@ -148,111 +111,6 @@ async def plan_queries(question, earlier, extra, config_path):
 
 
 # ---------------------------------------------------------------- search and read
-
-def clean_html_text(value):
-    return html.unescape(re.sub(r"<[^>]+>", "", value or "")).strip()
-
-
-async def brave(client, key, query, count):
-    params = {"q": query, "count": max(3, min(int(count), 20)), "extra_snippets": "true"}
-    headers = {"X-Subscription-Token": key, "Accept": "application/json"}
-    for attempt in range(3):
-        try:
-            response = await client.get(BRAVE_URL, params=params, headers=headers)
-        except httpx.HTTPError as error:
-            LOG.warning("Veloce: Brave request failed for %r: %s", query, error)
-            return []
-        if response.status_code == 429 and attempt < 2:
-            await asyncio.sleep(1.1 * (attempt + 1))
-            continue
-        if response.status_code != 200:
-            LOG.warning("Veloce: Brave answered %s for %r", response.status_code, query)
-            return []
-        break
-    try:
-        results = ((response.json().get("web") or {}).get("results")) or []
-    except ValueError:
-        return []
-    found = []
-    for item in results:
-        url = item.get("url") if isinstance(item, dict) else None
-        if not url or urlsplit(url).scheme not in ("http", "https"):
-            continue
-        snippet = " … ".join(clean_html_text(s) for s in [item.get("description")] + (item.get("extra_snippets") or [])
-                             if isinstance(s, str) and s.strip())
-        found.append({"url": url, "title": clean_html_text(item.get("title"))[:200],
-                      "snippet": snippet[:SNIPPET_CHARS], "age": str(item.get("age") or "")[:40]})
-    return found
-
-
-AD_HOSTS = ("bing.com", "duckduckgo.com")
-# Free scrapers fail often ("No results" when rate-limited, a Wikipedia backend that fails the whole
-# call for region wt-wt): alternate two configurations, a few seconds at most.
-DDG_ATTEMPTS = (("wt-wt", "duckduckgo"), ("us-en", "auto"), ("wt-wt", "duckduckgo"))
-
-
-def _ddg_text(query, count):
-    """Best-effort DuckDuckGo results with ad links dropped; raises the last error if every attempt fails."""
-    from ddgs import DDGS
-    error = None
-    for attempt, (region, backend) in enumerate(DDG_ATTEMPTS):
-        if attempt == len(DDG_ATTEMPTS) - 1:
-            time.sleep(1.5)
-        try:
-            items = DDGS().text(query, region=region, backend=backend, max_results=count) or []
-        except Exception as exc:
-            error = exc
-            continue
-        items = [item for item in items if isinstance(item, dict)
-                 and not (urlsplit(item.get("href") or "").hostname or "").endswith(AD_HOSTS)]
-        if items:
-            return items
-    if error is not None:
-        raise error
-    return []
-
-
-async def duckduckgo(query, count, search_fn=_ddg_text):
-    """Backup search when Brave is unavailable (no key, usage limit, errors): ddgs, unofficial and keyless."""
-    try:
-        items = await asyncio.wait_for(asyncio.to_thread(search_fn, query, max(3, min(int(count), 20))), 12)
-    except Exception as error:
-        LOG.warning("Veloce: DuckDuckGo failed for %r: %s", query, error)
-        return []
-    found = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        url = item.get("href") or item.get("url") or item.get("link") or ""
-        if urlsplit(url).scheme not in ("http", "https"):
-            continue
-        snippet = item.get("body") or item.get("snippet") or item.get("description") or ""
-        found.append({"url": url, "title": clean_html_text(item.get("title"))[:200],
-                      "snippet": clean_html_text(snippet)[:SNIPPET_CHARS], "age": ""})
-    return found
-
-
-async def web_search(client, key, query, count, backup=duckduckgo):
-    results = await brave(client, key, query, count) if key else []
-    if not results and backup is not None:
-        results = await backup(query, count)
-        if results:
-            LOG.warning("Veloce: Brave gave nothing for %r; used DuckDuckGo", query)
-    return results
-
-
-def interleave(lists):
-    """Round-robin over the queries' results, first occurrence of each URL wins."""
-    merged, seen = [], set()
-    for index in range(max((len(items) for items in lists), default=0)):
-        for items in lists:
-            if index < len(items):
-                key = items[index]["url"].split("#")[0].rstrip("/")
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(items[index])
-    return merged
-
 
 _public_cache = {}
 
@@ -362,22 +220,42 @@ async def log(sink, content, output, **extra):
     await sink.send_json({"type": "logs", "content": content, "output": output, **extra})
 
 
+def interleave(lists):
+    """Round-robin over the queries' merged results, first occurrence of each URL wins."""
+    merged, seen = [], {}
+    for index in range(max((len(items) for items in lists), default=0)):
+        for items in lists:
+            if index < len(items):
+                item = items[index]
+                key = engines.url_key(item["url"])
+                if key in seen:
+                    seen[key]["engines"] = sorted(set(seen[key]["engines"]) | set(item.get("engines") or ()),
+                                                  key=engines.ENGINES.index)
+                    continue
+                seen[key] = item
+                merged.append(item)
+    return merged
+
+
 async def fast_research(question, language, earlier, extra, files_text, location, max_results, config_path, sink, *,
                         planner=plan_queries, writer=write_answer, files_fn=report_files, transport=None,
-                        guard=_guard_request, backup=duckduckgo):
-    key = os.environ.get("BRAVE_API_KEY", "")
+                        guard=_guard_request, search=engines.search_all):
     queries = await planner(question, earlier, extra, config_path)
     await log(sink, "subqueries", "Search plan: " + " | ".join(queries), metadata=queries)
+    for query in queries:
+        await log(sink, "running_subquery_research", f"🔍 Running research for '{query}'...")
+    # Every query on every engine at once; asyncio.to_thread passes the turn's timeout and stats on.
+    lists = await asyncio.gather(*(asyncio.to_thread(search, q, max_results) for q in queries))
+    results = interleave(lists)[:LISTED_RESULTS]
+    if not results:
+        raise RuntimeError("The web search returned no results")
+    active = engines.current()
+    if active:
+        active.stats.mark_used(results)
     timeout = httpx.Timeout(FETCH_DEADLINE, connect=3.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, transport=transport,
                                  headers={"User-Agent": USER_AGENT, "Accept-Language": "*"},
                                  event_hooks={"request": [guard]} if guard else None) as client:
-        for query in queries:
-            await log(sink, "running_subquery_research", f"🔍 Running research for '{query}'...")
-        lists = await asyncio.gather(*(web_search(client, key, q, max_results, backup) for q in queries))
-        results = interleave(lists)
-        if not results:
-            raise RuntimeError("The web search returned no results")
         target = max(4, min(int(max_results), 8))
         candidates = [r for r in results if not urlsplit(r["url"]).path.lower().endswith(".pdf")][:target + 3]
         tasks = {asyncio.create_task(fetch_text(client, r["url"])): r for r in candidates}

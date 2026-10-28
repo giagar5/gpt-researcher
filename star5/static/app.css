@@ -215,6 +215,16 @@ button{cursor:pointer}
 .num{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;
   font-size:11px;font-weight:700;background:var(--cp-surface-soft);color:var(--cp-text-muted)}
 .badge{font-size:11px;font-weight:700;padding:1px 7px;border-radius:999px;background:var(--cp-highlight);color:var(--cp-text)}
+.engines{display:flex;flex-wrap:wrap;gap:6px;margin:-2px 0 10px}
+.eng{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;border:1px solid var(--cp-border);
+  background:var(--cp-surface);font-size:12px;color:var(--cp-text-muted);cursor:default}
+.eng b{color:var(--cp-text);font-weight:600}
+.eng.warn{border-style:dashed}
+.edots{display:inline-flex;gap:3px;flex:none}
+.edot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.e-brave{background:#fb542b}
+.e-bing{background:#1aa0c8}
+.e-duckduckgo{background:#d9a400}
 .grouped{display:flex;flex-direction:column;gap:12px;margin-top:4px}
 .grp{border:1px solid var(--cp-border);border-radius:12px;padding:10px 14px;background:var(--cp-surface)}
 .grp-h{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px}

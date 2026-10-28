@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import engines
 from .effort import reasoning
 from .media import attachment_context, location_text
 from .tokens import metered
@@ -159,6 +160,17 @@ class Sink:
             await self.job.emit(event)
 
 
+def with_engines(fields, visited):
+    """Tag each source with the engines that found it and add the per-engine counts of the turn."""
+    active = engines.current()
+    if active is None:
+        return fields
+    for source in fields["sources"]:
+        source["engines"] = active.stats.engines_of(source["url"])
+    cited = [s["url"] for s in fields["sources"] if s.get("cited")]
+    fields["engines"] = active.stats.summary(visited, cited)
+    return fields
+
 class Runner:
     def __init__(self, store, research_fn, chat_fn, configs, clock=time.time,
                  research_slots=1, chat_slots=2, brief_fn=None, uploads=None, docs_root=None, fast_fn=None):
@@ -213,7 +225,8 @@ class Runner:
                     if self.uploads is not None and turn["attachments"]:
                         extra.update(self.uploads.tokens(job.turn_id))
                     # Veloce defaults to low reasoning; an explicit choice always wins.
-                    with reasoning(turn.get("effort") or ("low" if fast else "")):
+                    with reasoning(turn.get("effort") or ("low" if fast else "")), \
+                            engines.session(turn["mode"] if turn["kind"] == "research" else "chat"):
                         if turn["kind"] == "chat":
                             fields = await self._chat(turn, config, context)
                         else:
@@ -309,7 +322,8 @@ class Runner:
         answer, research_sources, visited, files = await self.research_fn(
             task, MODES[turn["mode"]], turn["tone"], turn["max_results"], config, Sink(job), context["docs"])
         await job.emit({"t": "phase", "phase": "write"})
-        return {"answer": answer, "sources": build_sources(answer, research_sources, visited), "files": files}
+        return with_engines({"answer": answer, "sources": build_sources(answer, research_sources, visited),
+                             "files": files}, visited)
 
     async def _fast(self, job, turn, config, context):
         previous = [t for t in self.store.history(turn["thread_id"], turn["seq"]) if t["kind"] == "research"]
@@ -318,7 +332,8 @@ class Runner:
             turn["question"], LANGS[turn["lang"]], earlier, self._extra(context), context["full"],
             context["location"], turn["max_results"], config, Sink(job))
         await job.emit({"t": "phase", "phase": "write"})
-        return {"answer": answer, "sources": build_sources(answer, research_sources, visited), "files": files}
+        return with_engines({"answer": answer, "sources": build_sources(answer, research_sources, visited),
+                             "files": files}, visited)
 
     async def _chat(self, turn, config, context):
         history = self.store.history(turn["thread_id"], turn["seq"])
@@ -349,7 +364,7 @@ class Runner:
             content += f"\n\n{context['location']}"
         messages.append({"role": "user", "content": f"{content}\n\n(Answer in {language}.)"})
         answer, searched = await self.chat_fn(report, messages, config)
-        return {"answer": answer, "sources": build_sources(answer, searched, [])}
+        return with_engines({"answer": answer, "sources": build_sources(answer, searched, [])}, [])
 
     async def events(self, turn_id, after=0):
         """Replay then follow a job's events; a finished turn not in memory yields only its final state."""

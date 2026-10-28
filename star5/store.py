@@ -86,6 +86,8 @@ class Store:
                 conn.execute("ALTER TABLE turns ADD COLUMN location TEXT NOT NULL DEFAULT ''")
             if "effort" not in columns:
                 conn.execute("ALTER TABLE turns ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
+            if "engines" not in columns:
+                conn.execute("ALTER TABLE turns ADD COLUMN engines TEXT NOT NULL DEFAULT '{}'")
 
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -100,6 +102,7 @@ class Store:
         turn["files"] = json.loads(turn["files"] or "{}")
         turn["attachments"] = json.loads(turn.get("attachments") or "[]")
         turn["location"] = json.loads(turn["location"]) if turn.get("location") else None
+        turn["engines"] = json.loads(turn.get("engines") or "{}")
         return turn
 
     @staticmethod
@@ -151,10 +154,10 @@ class Store:
 
     def update_turn(self, turn_id, **fields):
         allowed = {"status", "answer", "sources", "files", "error", "started", "finished", "lang", "brief",
-                   "tokens_in", "tokens_out", "llm_calls"}
+                   "tokens_in", "tokens_out", "llm_calls", "engines"}
         if not fields or set(fields) - allowed:
             raise ValueError("Invalid turn fields")
-        values = {k: json.dumps(v, ensure_ascii=False) if k in ("sources", "files") else v
+        values = {k: json.dumps(v, ensure_ascii=False) if k in ("sources", "files", "engines") else v
                   for k, v in fields.items()}
         assignments = ",".join(f"{name}=?" for name in values)
         with self.connect() as conn:
