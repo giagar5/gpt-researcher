@@ -270,6 +270,29 @@ button{cursor:pointer}
 .follow{position:sticky;bottom:0;margin:8px 0 0;border-radius:24px 24px 0 0;border-bottom:0;
   padding-bottom:max(10px,env(safe-area-inset-bottom));box-shadow:0 -8px 24px var(--cp-bg)}
 .follow textarea{font-size:16px;min-height:28px}
+.seg-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+#fmodes button{padding:4px 9px;gap:4px}
+.follow .opt-chip{padding:6px 10px}
+.follow .opts{max-height:40vh;overflow:auto}
+
+/* jump to the end of the conversation, floating above the follow-up box */
+.to-bottom{position:absolute;left:50%;top:-56px;transform:translateX(-50%);width:40px;height:40px;border-radius:50%;
+  display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--cp-border);
+  background:var(--cp-surface);color:var(--cp-text);box-shadow:var(--cp-shadow)}
+.to-bottom:hover{border-color:var(--cp-border-strong);background:var(--cp-bg-elevated)}
+.to-bottom svg{width:20px;height:20px}
+
+/* dots rail: one dot per question, a small one per answer section; the current one is highlighted */
+.rail{position:fixed;top:50%;transform:translateY(-50%);z-index:4;display:flex;flex-direction:column;align-items:center;
+  gap:2px;max-height:74vh;overflow:hidden;
+  left:max(calc(var(--side) + 6px),calc(var(--side) + (100vw - var(--side) - 820px) / 2 - 28px))}
+.rail .dot{position:relative;width:18px;height:14px;padding:0;border:0;background:transparent;flex:none}
+.rail .dot::before{content:"";position:absolute;left:50%;top:50%;width:7px;height:7px;border-radius:50%;
+  transform:translate(-50%,-50%);background:var(--cp-text-muted);opacity:.45;transition:all .15s}
+.rail .dot.ds::before{width:4px;height:4px;opacity:.35}
+.rail .dot:hover::before{opacity:1;transform:translate(-50%,-50%) scale(1.35)}
+.rail .dot.on::before{width:10px;height:10px;opacity:1;background:#2a95b8;box-shadow:0 0 0 3px rgba(42,149,184,.22)}
+.rail .dot.ds.on::before{width:7px;height:7px}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{50%{opacity:.35}}
@@ -298,5 +321,10 @@ button{cursor:pointer}
   #modes .seg-time{display:none}
   .att-chip{max-width:calc(100vw - 60px)}
   .tool{width:34px;height:34px}
+  .rail{left:auto;right:2px;gap:0}
+  .rail .dot{width:14px;height:12px}
+  .rail .dot.ds{display:none}
+  #fmodes .seg-time{display:none}
+  .follow .opt-chip span{display:none}
 }
-@media print{.side,.mtop,.follow,.actions,.progress,.cancel{display:none !important}.shell{display:block}}
+@media print{.side,.mtop,.follow,.actions,.progress,.cancel,.rail{display:none !important}.shell{display:block}}

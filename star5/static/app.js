@@ -86,11 +86,13 @@
     document.querySelectorAll("[data-i18n-title]").forEach(e => { e.title = T[e.dataset.i18nTitle] || ""; e.setAttribute("aria-label", e.title); });
     document.querySelectorAll("[data-i18n-aria]").forEach(e => e.setAttribute("aria-label", T[e.dataset.i18nAria] || ""));
     $("#uiLang").value = state.ui;
-    buildSeg($("#modes"), MODES, state.mode, modeLabel, m => { state.mode = m; store.set("s5.mode", m); hint(); }, MODE_ICON);
-    buildSeg($("#kinds"), ["chat", "research"], state.kind, k => T.kinds[k], k => { state.kind = k; store.set("s5.kind", k); }, {chat: "book", research: "globe"});
+    renderModes();
     fillSelect($("#lang"), ["auto", ...LANGS], state.lang, v => v === "auto" ? T.langAuto : T.langNames[v]);
     fillSelect($("#tone"), TONES, state.tone, v => T.tones[v]);
     fillSelect($("#effort"), EFFORTS, state.effort, v => v ? T.efforts[v] : T.effortAuto);
+    fillSelect($("#flang"), ["auto", ...LANGS], state.lang, v => v === "auto" ? T.langAuto : T.langNames[v]);
+    fillSelect($("#ftone"), TONES, state.tone, v => T.tones[v]);
+    fillSelect($("#feffort"), EFFORTS, state.effort, v => v ? T.efforts[v] : T.effortAuto);
     hint();
     renderLibrary();
     renderRecent();
@@ -98,6 +100,17 @@
     if (state.thread) renderThread();
   }
   function hint() { $("#modeHint").textContent = T.modeHints[state.mode]; }
+  /* The home and follow-up composers share mode and options; picking in one updates both. */
+  function renderModes() {
+    const pick = m => { state.mode = m; store.set("s5.mode", m); renderModes(); };
+    buildSeg($("#modes"), MODES, state.mode, modeLabel, pick, MODE_ICON);
+    buildSeg($("#fmodes"), MODES, state.mode, modeLabel, pick, MODE_ICON);
+    buildSeg($("#kinds"), ["chat", "research"], state.kind, k => T.kinds[k],
+      k => { state.kind = k; store.set("s5.kind", k); renderModes(); }, {chat: "book", research: "globe"});
+    $("#fmodes").hidden = state.kind !== "research";
+    $("#fmodes").title = T.modeHints[state.mode];
+    hint();
+  }
   function modeLabel(m) {
     const f = document.createDocumentFragment();
     f.append(T.modes[m], el("span", "seg-time", T.modeTimes[m]));
@@ -203,6 +216,7 @@
   /* ---------- views ---------- */
   function show(view) {
     ["home", "thread", "missing"].forEach(id => { $(`#${id}`).hidden = id !== view; });
+    if (view !== "thread") { $("#rail").hidden = true; $("#toBottom").hidden = true; }
     document.body.classList.remove("menu"); $("#scrim").hidden = true;
   }
   async function route() {
@@ -228,7 +242,51 @@
     const root = $("#turns");
     root.replaceChildren(...state.thread.turns.map((t, i) => renderTurn(t, i === 0)));
     renderTotal();
+    scheduleRail();
   }
+
+  /* ---------- conversation navigation: dots rail and jump to the end ---------- */
+  const RAIL_MAX = 48;
+  let railTimer = 0, railTargets = [], railFrame = 0;
+  function scheduleRail() { clearTimeout(railTimer); railTimer = setTimeout(renderRail, 250); }
+  function renderRail() {
+    const rail = $("#rail");
+    if (!state.thread || $("#thread").hidden) { rail.hidden = true; railTargets = []; return; }
+    const targets = [];
+    document.querySelectorAll("#turns .turn").forEach(turn => {
+      targets.push({node: turn, kind: "turn", label: $(".q", turn).textContent});
+      turn.querySelectorAll(".answer h2").forEach(h => targets.push({node: h, kind: "sec", label: h.textContent}));
+    });
+    // Long conversations: keep every question, drop section dots first.
+    railTargets = targets.length > RAIL_MAX ? targets.filter(t => t.kind === "turn").slice(-RAIL_MAX) : targets;
+    rail.replaceChildren(...railTargets.map(t => {
+      // "dq"/"ds", not "turn": a .turn class would pick up the turn styles and break turn counts.
+      const b = el("button", `dot ${t.kind === "turn" ? "dq" : "ds"}`); b.type = "button";
+      b.title = t.label.trim().slice(0, 140); b.setAttribute("aria-label", b.title);
+      b.addEventListener("click", () => t.node.scrollIntoView({behavior: "smooth", block: "start"}));
+      return b;
+    }));
+    rail.hidden = railTargets.length < 2;
+    onScroll();
+  }
+  function onScroll() {
+    cancelAnimationFrame(railFrame);
+    railFrame = requestAnimationFrame(() => {
+      if ($("#thread").hidden) { $("#toBottom").hidden = true; return; }
+      const doc = document.documentElement;
+      const fromBottom = doc.scrollHeight - (window.scrollY + window.innerHeight);
+      $("#toBottom").hidden = fromBottom < 400;
+      let current = 0;
+      const line = Math.min(160, window.innerHeight * 0.3);
+      railTargets.forEach((t, i) => { if (t.node.getBoundingClientRect().top <= line) current = i; });
+      if (fromBottom < 4 && railTargets.length) current = railTargets.length - 1;
+      $("#rail").querySelectorAll(".dot").forEach((d, i) => {
+        d.classList.toggle("on", i === current);
+        if (i === current) d.setAttribute("aria-current", "location"); else d.removeAttribute("aria-current");
+      });
+    });
+  }
+  function toEnd() { window.scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"}); }
 
   /* ---------- a turn: question, progress, sources, answer, actions ---------- */
   function liveOf(id) {
@@ -516,6 +574,7 @@
     const node = document.querySelector(`.turn[data-id="${id}"]`);
     if (index >= 0 && node) fillTurn(node, state.thread.turns[index], index === 0);
     renderTotal();
+    scheduleRail();
   }
 
   /* ---------- attachments and location ---------- */
@@ -780,15 +839,28 @@
     $("#ask").addEventListener("submit", submitHome);
     $("#follow").addEventListener("submit", submitFollow);
     enterSubmits($("#q"), $("#ask")); enterSubmits($("#fq"), $("#follow"));
-    $("#optBtn").addEventListener("click", () => {
-      const o = $("#opts"); o.hidden = !o.hidden; $("#optBtn").setAttribute("aria-expanded", String(!o.hidden));
+    const toggleOpts = (button, panel) => button.addEventListener("click", () => {
+      panel.hidden = !panel.hidden; button.setAttribute("aria-expanded", String(!panel.hidden));
     });
-    $("#lang").addEventListener("change", e => { state.lang = e.target.value; store.set("s5.lang", state.lang); });
-    $("#tone").addEventListener("change", e => { state.tone = e.target.value; store.set("s5.tone", state.tone); });
-    $("#effort").addEventListener("change", e => { state.effort = e.target.value; store.set("s5.effort", state.effort); });
-    const sites = $("#sites"), out = $("#sitesOut");
-    const syncSites = () => { out.textContent = sites.value; };
-    sites.addEventListener("input", () => { state.sites = Number(sites.value); store.set("s5.sites", sites.value); syncSites(); });
+    toggleOpts($("#optBtn"), $("#opts")); toggleOpts($("#fOptBtn"), $("#fopts"));
+    // Each option has a control in both panels; a change updates state, storage and the twin control.
+    const pair = (a, b, key, field) => [a, b].forEach((select, i) => select.addEventListener("change", () => {
+      state[field] = select.value; store.set(key, select.value); [a, b][1 - i].value = select.value;
+    }));
+    pair($("#lang"), $("#flang"), "s5.lang", "lang");
+    pair($("#tone"), $("#ftone"), "s5.tone", "tone");
+    pair($("#effort"), $("#feffort"), "s5.effort", "effort");
+    const sites = $("#sites"), fsites = $("#fsites");
+    const syncSites = () => {
+      sites.value = fsites.value = String(state.sites);
+      $("#sitesOut").textContent = $("#fsitesOut").textContent = String(state.sites);
+    };
+    [sites, fsites].forEach(input => input.addEventListener("input", () => {
+      state.sites = Number(input.value); store.set("s5.sites", input.value); syncSites();
+    }));
+    $("#toBottom").addEventListener("click", toEnd);
+    window.addEventListener("scroll", onScroll, {passive: true});
+    window.addEventListener("resize", onScroll);
     $("#uiLang").addEventListener("change", e => { state.ui = e.target.value; store.set("s5.ui", state.ui); applyI18n(); });
     $("#libFilter").addEventListener("input", renderLibrary);
     $("#recentAll").addEventListener("click", openLibrary);
@@ -800,8 +872,8 @@
     applyI18n();
     api("/api/s5/config").then(cfg => {
       if (!store.get("s5.sites", "")) state.sites = cfg.max_results;
-      sites.value = String(state.sites); syncSites();
-    }).catch(() => { sites.value = String(state.sites); syncSites(); });
+      syncSites();
+    }).catch(syncSites);
     loadLibrary();
     route();
     setInterval(() => { if (state.threads.some(t => t.status === "running" || t.status === "queued")) loadLibrary(); }, 20000);

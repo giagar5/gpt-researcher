@@ -107,11 +107,17 @@
       <div class="thread-total" id="threadTotal" hidden></div>
       <div id="turns"></div>
       <form id="follow" class="composer follow" autocomplete="off">
+        <button type="button" class="to-bottom" id="toBottom" data-i18n-title="toBottom" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"/></svg>
+        </button>
         <label class="sr" for="fq" data-i18n="followPh"></label>
         <textarea id="fq" rows="1" maxlength="2000" data-i18n-ph="followPh" required></textarea>
         <div class="attach-list" hidden></div>
         <div class="composer-bar">
-          <div class="seg small" role="radiogroup" id="kinds"></div>
+          <div class="seg-row">
+            <div class="seg small" role="radiogroup" id="kinds"></div>
+            <div class="seg small" role="radiogroup" id="fmodes" data-i18n-aria="mode" hidden></div>
+          </div>
           <div class="bar-right">
             <div class="tools">
               <button type="button" class="tool" data-act="attach" data-i18n-title="attach"></button>
@@ -119,13 +125,28 @@
               <button type="button" class="tool" data-act="locate" data-i18n-title="locate"></button>
               <input type="file" class="picker" multiple hidden>
             </div>
+            <button type="button" class="chip opt-chip" id="fOptBtn" aria-expanded="false" aria-controls="fopts" data-i18n-title="options">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+              <span data-i18n="options"></span>
+            </button>
             <button type="submit" class="send" data-i18n-title="send">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
             </button>
           </div>
         </div>
+        <div id="fopts" class="opts" hidden>
+          <label><span data-i18n="answerLang"></span>
+            <select id="flang"></select></label>
+          <label><span data-i18n="tone"></span>
+            <select id="ftone"></select></label>
+          <label><span data-i18n="effort"></span>
+            <select id="feffort"></select></label>
+          <label><span data-i18n="sites"></span>
+            <span class="range"><input type="range" id="fsites" min="3" max="15" step="1"><output id="fsitesOut"></output></span></label>
+        </div>
       </form>
     </section>
+    <nav id="rail" class="rail" data-i18n-aria="navConv" hidden></nav>
 
     <section id="missing" class="home" hidden>
       <h1 data-i18n="notFound"></h1>
