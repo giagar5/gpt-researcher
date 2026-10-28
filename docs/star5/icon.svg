@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Star5 Search</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d4468"/>
+      <stop offset="1" stop-color="#041b30"/>
+    </linearGradient>
+    <linearGradient id="feed" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7ff5e1" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#9ff7ea"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f2fffd"/>
+      <stop offset="1" stop-color="#7ff5e1" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="38" cy="32" r="26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bff9f0" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#5ee6f2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <circle cx="38" cy="32" r="26" fill="url(#glow)"/>
+  <!-- information flowing in -->
+  <g fill="none" stroke="url(#feed)" stroke-width="3" stroke-linecap="round">
+    <path d="M9 13C15 15 20 21 25 27"/>
+    <path d="M8 32H22"/>
+    <path d="M9 51C15 49 20 43 25 37"/>
+  </g>
+  <g fill="#b4faef">
+    <circle cx="8.5" cy="12.5" r="3.4"/>
+    <circle cx="7" cy="32" r="3.4"/>
+    <circle cx="8.5" cy="51.5" r="3.4"/>
+  </g>
+  <!-- the processed answer going out -->
+  <path d="M51 29.5 63 30.6 63 33.4 51 34.5Z" fill="url(#beam)"/>
+  <!-- faceted crystal star -->
+  <g stroke="#f2fffd" stroke-width=".6" stroke-linejoin="round">
+    <path d="M38 32 33.1 25.2 38 12Z" fill="#f2fffd"/>
+    <path d="M38 32 38 12 42.9 25.2Z" fill="#7fe3ec"/>
+    <path d="M38 32 42.9 25.2 57 25.8Z" fill="#cdfbf4"/>
+    <path d="M38 32 57 25.8 46 34.6Z" fill="#3fb6cf"/>
+    <path d="M38 32 46 34.6 49.8 48.2Z" fill="#94f1e8"/>
+    <path d="M38 32 49.8 48.2 38 40.4Z" fill="#2a95b8"/>
+    <path d="M38 32 38 40.4 26.2 48.2Z" fill="#62d2e2"/>
+    <path d="M38 32 26.2 48.2 30 34.6Z" fill="#1f7fa6"/>
+    <path d="M38 32 30 34.6 19 25.8Z" fill="#aef7ee"/>
+    <path d="M38 32 19 25.8 33.1 25.2Z" fill="#4cc3d8"/>
+  </g>
+  <circle cx="38" cy="32" r="2.6" fill="#ffffff"/>
+</svg>

@@ -2,7 +2,7 @@
   <img src="docs/star5/star5-search-ocean.jpg" alt="Star5 Search: research, answered" width="100%">
 </p>
 
-<h1 align="center">Star5 Search</h1>
+<h1 align="center"><img src="docs/star5/icon.svg" alt="" width="44" align="center">&nbsp;Star5 Search</h1>
 
 <p align="center">
   <b>A private, self-hosted research assistant for the web.</b><br>
