@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Star5 Search</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e4a70"/>
+      <stop offset="1" stop-color="#05213a"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="32" cy="35" r="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9ff7ea" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#5ee6f2" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="13" fill="url(#bg)"/>
+  <circle cx="32" cy="35" r="30" fill="url(#glow)"/>
+  <!-- a big crystal star, two tones per arm so it stays crisp at 16 px -->
+  <path d="M32 35 25.2 25.7 32 7Z M32 35 42.9 38.6 58.6 26.4Z M32 35 48.5 57.7 32 46.5Z M32 35 21.1 38.6 15.5 57.7Z M32 35 5.4 26.4 25.2 25.7Z" fill="#f0fffc"/>
+  <path d="M32 35 32 7 38.8 25.7Z M32 35 38.8 25.7 58.6 26.4Z M32 35 42.9 38.6 48.5 57.7Z M32 35 32 46.5 15.5 57.7Z M32 35 21.1 38.6 5.4 26.4Z" fill="#46c2dc"/>
+  <circle cx="32" cy="35" r="3" fill="#ffffff"/>
+</svg>
