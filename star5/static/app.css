@@ -282,17 +282,38 @@ button{cursor:pointer}
 .to-bottom:hover{border-color:var(--cp-border-strong);background:var(--cp-bg-elevated)}
 .to-bottom svg{width:20px;height:20px}
 
-/* dots rail: one dot per question, a small one per answer section; the current one is highlighted */
-.rail{position:fixed;top:50%;transform:translateY(-50%);z-index:4;display:flex;flex-direction:column;align-items:center;
-  gap:2px;max-height:74vh;overflow:hidden;
-  left:max(calc(var(--side) + 6px),calc(var(--side) + (100vw - var(--side) - 820px) / 2 - 28px))}
-.rail .dot{position:relative;width:18px;height:14px;padding:0;border:0;background:transparent;flex:none}
+/* conversation timeline (Google Photos-style): dots at the scroll position of each question (big) and
+   answer section (small); hover (desktop) or a tap on the right edge (touch) shows the titles. */
+.rail{position:fixed;z-index:6;width:30px;touch-action:none;user-select:none;-webkit-user-select:none;
+  right:max(6px,calc((100vw - var(--side) - 820px) / 2 - 40px))}
+.rail-track{position:absolute;left:50%;top:-6px;bottom:-6px;width:2px;transform:translateX(-50%);border-radius:2px;
+  background:var(--cp-border);opacity:0;transition:opacity .12s}
+.rail.open .rail-track{opacity:1}
+.rail-items{position:absolute;inset:0}
+.rail .dot{position:absolute;left:0;width:30px;height:14px;margin-top:-7px;padding:0;border:0;background:transparent;cursor:pointer}
 .rail .dot::before{content:"";position:absolute;left:50%;top:50%;width:7px;height:7px;border-radius:50%;
-  transform:translate(-50%,-50%);background:var(--cp-text-muted);opacity:.45;transition:all .15s}
-.rail .dot.ds::before{width:4px;height:4px;opacity:.35}
-.rail .dot:hover::before{opacity:1;transform:translate(-50%,-50%) scale(1.35)}
+  transform:translate(-50%,-50%);background:var(--cp-text-muted);opacity:.5;transition:transform .1s,opacity .1s,background .1s}
+.rail .dot.ds::before{width:4px;height:4px;opacity:.4}
 .rail .dot.on::before{width:10px;height:10px;opacity:1;background:#2a95b8;box-shadow:0 0 0 3px rgba(42,149,184,.22)}
 .rail .dot.ds.on::before{width:7px;height:7px}
+.rail .dot.hot::before{opacity:1;background:var(--cp-text);transform:translate(-50%,-50%) scale(1.7)}
+.rail .lbl{position:absolute;right:32px;top:50%;transform:translate(8px,-50%);opacity:0;pointer-events:none;
+  white-space:nowrap;max-width:min(300px,64vw);overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:600;
+  line-height:18px;padding:1px 10px;border-radius:999px;background:var(--cp-surface);color:var(--cp-text-soft);
+  box-shadow:var(--card);transition:opacity .1s,transform .1s}
+.rail.open .lbl{opacity:1;transform:translate(0,-50%);pointer-events:auto}
+.rail .dot.on .lbl{color:var(--cp-text)}
+.rail .dot.hot .lbl,.rail .dot.covered .lbl{opacity:0}
+.rail-thumb{position:absolute;left:50%;width:8px;transform:translateX(-50%);border-radius:5px;background:#2a95b8;
+  opacity:0;transition:opacity .2s;pointer-events:none}
+.rail.open .rail-thumb,.rail.active .rail-thumb{opacity:.28}
+.rail-focus{position:absolute;right:36px;transform:translateY(-50%);z-index:2;display:flex;flex-direction:column;
+  align-items:flex-end;gap:1px;max-width:min(380px,74vw);padding:6px 12px 5px;border-radius:12px;
+  background:var(--cp-bg-elevated);border:1px solid var(--cp-border);border-bottom:2px solid #2a95b8;
+  box-shadow:var(--cp-shadow);pointer-events:none}
+.rail-focus b,.rail-focus span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rail-focus b{font-size:14px;font-weight:650;color:var(--cp-text)}
+.rail-focus span{font-size:12px;color:var(--cp-text-muted)}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{50%{opacity:.35}}
@@ -321,9 +342,13 @@ button{cursor:pointer}
   #modes .seg-time{display:none}
   .att-chip{max-width:calc(100vw - 60px)}
   .tool{width:34px;height:34px}
-  .rail{left:auto;right:2px;gap:0}
-  .rail .dot{width:14px;height:12px}
-  .rail .dot.ds{display:none}
+  .rail{right:0;width:32px}
+  .rail .dot{width:32px}
+  .rail .dot::before{opacity:.35}
+  .rail.open .dot::before,.rail.active .dot::before{opacity:.6}
+  .rail .dot.on::before{opacity:1}
+  .rail.open::before{content:"";position:fixed;inset:0;pointer-events:none;
+    background:linear-gradient(to left,var(--cp-bg) 0,var(--cp-bg) 18%,transparent 78%);opacity:.92}
   #fmodes .seg-time{display:none}
   .follow .opt-chip span{display:none}
 }

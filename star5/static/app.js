@@ -245,45 +245,177 @@
     scheduleRail();
   }
 
-  /* ---------- conversation navigation: dots rail and jump to the end ---------- */
-  const RAIL_MAX = 48;
-  let railTimer = 0, railTargets = [], railFrame = 0;
+  /* ---------- conversation timeline (Google Photos-style scrubber) and jump to the end ----------
+     Dots sit at the scroll position of their question (big) or answer section (small). Desktop: hovering
+     the timeline shows question titles and an instant preview of the point under the pointer. Touch: the
+     first tap on the right edge shows the titles, a tap on a title jumps there, dragging scrubs. */
+  const RAIL_MAX = 160, LABEL_GAP = 24;
+  let railTimer = 0, railFrame = 0, railItems = [], railGeo = {height: 1, max: 1}, railCurrent = 0, railThumb = 0;
+  let railDrag = null, railMode = null, railHideTimer = 0, railActiveTimer = 0;
+  const railText = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
   function scheduleRail() { clearTimeout(railTimer); railTimer = setTimeout(renderRail, 250); }
+  function headerOffset() {
+    const m = $(".mtop");
+    return m && getComputedStyle(m).display !== "none" ? m.getBoundingClientRect().height : 0;
+  }
+  function railGeometry() {
+    const rail = $("#rail"), doc = document.documentElement;
+    const top = headerOffset() + (headerOffset() ? 14 : 24);
+    const followTop = Math.min($("#follow").getBoundingClientRect().top, window.innerHeight);
+    const bottom = Math.max(24, window.innerHeight - followTop + 16);
+    rail.style.top = `${top}px`; rail.style.bottom = `${bottom}px`;
+    railGeo = {height: Math.max(40, window.innerHeight - top - bottom), max: Math.max(1, doc.scrollHeight - window.innerHeight),
+      full: Math.max(1, doc.scrollHeight)};
+    return railGeo;
+  }
+  const targetOf = node => Math.max(0, node.getBoundingClientRect().top + window.scrollY - headerOffset() - 8);
   function renderRail() {
     const rail = $("#rail");
-    if (!state.thread || $("#thread").hidden) { rail.hidden = true; railTargets = []; return; }
-    const targets = [];
-    document.querySelectorAll("#turns .turn").forEach(turn => {
-      targets.push({node: turn, kind: "turn", label: $(".q", turn).textContent});
-      turn.querySelectorAll(".answer h2").forEach(h => targets.push({node: h, kind: "sec", label: h.textContent}));
+    if (!state.thread || $("#thread").hidden) { rail.hidden = true; railItems = []; return; }
+    let items = [];
+    document.querySelectorAll("#turns .turn").forEach((turn, qi) => {
+      items.push({node: turn, q: true, qi, label: $(".q", turn).textContent.trim()});
+      turn.querySelectorAll(".answer h2").forEach(h => items.push({node: h, q: false, qi, label: h.textContent.trim()}));
     });
-    // Long conversations: keep every question, drop section dots first.
-    railTargets = targets.length > RAIL_MAX ? targets.filter(t => t.kind === "turn").slice(-RAIL_MAX) : targets;
-    rail.replaceChildren(...railTargets.map(t => {
+    if (items.length > RAIL_MAX) items = items.filter(i => i.q);
+    const g = railGeometry();
+    rail.hidden = items.length < 2 || g.max < 80;
+    if (rail.hidden) { railItems = []; return; }
+    let lastLabel = -Infinity;
+    railItems = items.map((item, i) => {
+      item.target = targetOf(item.node);
+      // Positions over the whole conversation (like a minimap), so the last screen does not pile up at the bottom.
+      item.y = Math.min(1, (item.node.getBoundingClientRect().top + window.scrollY) / g.full) * g.height;
       // "dq"/"ds", not "turn": a .turn class would pick up the turn styles and break turn counts.
-      const b = el("button", `dot ${t.kind === "turn" ? "dq" : "ds"}`); b.type = "button";
-      b.title = t.label.trim().slice(0, 140); b.setAttribute("aria-label", b.title);
-      b.addEventListener("click", () => t.node.scrollIntoView({behavior: "smooth", block: "start"}));
-      return b;
-    }));
-    rail.hidden = railTargets.length < 2;
+      const b = el("button", `dot ${item.q ? "dq" : "ds"}`); b.type = "button";
+      b.dataset.i = String(i); b.style.top = `${item.y}px`;
+      b.setAttribute("aria-label", railText(item.label, 140));
+      b.addEventListener("click", e => { if (e.detail === 0) jumpTo(item); });   // keyboard only; pointers are handled by the rail
+      if (item.q && item.y - lastLabel >= LABEL_GAP) { b.append(el("span", "lbl", railText(item.label, 48))); lastLabel = item.y; }
+      item.el = b;
+      return item;
+    });
+    $(".rail-items", rail).replaceChildren(...railItems.map(item => item.el));
     onScroll();
+  }
+  function itemAt(y) {
+    let found = railItems[0];
+    for (const item of railItems) { if (item.y <= y + 1) found = item; else break; }
+    return found;
+  }
+  function nearestItem(y, within) {
+    let best = null, distance = within;
+    railItems.forEach(item => { const d = Math.abs(item.y - y); if (d <= distance) { distance = d; best = item; } });
+    return best;
+  }
+  function setHot(item) {
+    $("#rail").querySelectorAll(".dot.hot").forEach(d => d.classList.remove("hot"));
+    if (item) item.el.classList.add("hot");
+  }
+  function showFocus(item, y) {
+    const focus = $("#rail .rail-focus");
+    if (!item) { focus.hidden = true; railItems.forEach(it => it.el.classList.remove("covered")); return; }
+    const question = item.q ? item : railItems.find(it => it.q && it.qi === item.qi);
+    focus.replaceChildren(el("b", "", railText(question ? question.label : item.label, 72)));
+    if (!item.q) focus.append(el("span", "", `› ${railText(item.label, 72)}`));
+    focus.style.top = `${Math.max(14, Math.min(railGeo.height - 14, y))}px`;
+    focus.hidden = false;
+    railItems.forEach(it => it.el.classList.toggle("covered", Math.abs(it.y - y) < 20));
+  }
+  // While scrubbing the preview follows the band; otherwise it sits next to the current dot.
+  const showCurrent = () => {
+    const item = railItems[railCurrent];
+    if (item) showFocus(item, railDrag && railDrag.moved ? railThumb : item.y);
+  };
+  function jumpTo(item) { window.scrollTo({top: targetOf(item.node), behavior: "smooth"}); }
+  function scrubTo(y, smooth) {
+    // The pointer marks the middle of the visible part, as on the minimap band.
+    const top = Math.max(0, Math.min(1, y / railGeo.height)) * railGeo.full - window.innerHeight / 2;
+    window.scrollTo({top: Math.max(0, Math.min(railGeo.max, top)), behavior: smooth ? "smooth" : "auto"});
+  }
+  function openRail(mode) { clearTimeout(railHideTimer); railMode = mode; $("#rail").classList.add("open"); }
+  function closeRail(delay = 0) {
+    clearTimeout(railHideTimer);
+    railHideTimer = setTimeout(() => {
+      if (railDrag) return;
+      railMode = null; $("#rail").classList.remove("open"); setHot(null); showFocus(null);
+    }, delay);
+  }
+  function setupRail() {
+    const rail = $("#rail");
+    rail.append(el("div", "rail-track"), el("div", "rail-thumb"), el("div", "rail-items"), el("div", "rail-focus"));
+    $(".rail-focus", rail).hidden = true;
+    const railY = e => e.clientY - rail.getBoundingClientRect().top;
+    rail.addEventListener("pointerenter", e => { if (e.pointerType === "mouse") openRail("hover"); });
+    rail.addEventListener("pointerleave", e => { if (e.pointerType === "mouse" && !railDrag) closeRail(); });
+    rail.addEventListener("pointerdown", e => {
+      if (!railItems.length || (e.pointerType === "mouse" && e.button !== 0)) return;
+      const wasOpen = rail.classList.contains("open") && railMode === "touch";
+      const touch = e.pointerType !== "mouse";
+      openRail(touch ? "touch" : "hover");
+      railDrag = {id: e.pointerId, y0: e.clientY, moved: false, wasOpen, touch, dot: e.target.closest(".dot")};
+      rail.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      if (touch) showCurrent();
+    });
+    rail.addEventListener("pointermove", e => {
+      const y = railY(e);
+      if (railDrag && railDrag.id === e.pointerId) {
+        if (!railDrag.moved && Math.abs(e.clientY - railDrag.y0) > 5) { railDrag.moved = true; setHot(null); }
+        if (railDrag.moved) scrubTo(y, false);
+        return;
+      }
+      if (e.pointerType === "mouse") {
+        const dot = e.target.closest(".dot");
+        const near = dot ? railItems[Number(dot.dataset.i)] : nearestItem(y, 10);
+        setHot(near);
+        showFocus(near || itemAt(y), near ? near.y : y);
+      }
+    });
+    const end = e => {
+      if (!railDrag || railDrag.id !== e.pointerId) return;
+      const drag = railDrag; railDrag = null;
+      if (!drag.moved && e.type === "pointerup") {
+        if (drag.touch && !drag.wasOpen) { showCurrent(); closeRail(3500); return; }   // first tap: just show the titles
+        const item = drag.dot ? railItems[Number(drag.dot.dataset.i)] : nearestItem(railY(e), drag.touch ? 22 : 12);
+        if (item) jumpTo(item); else scrubTo(railY(e), true);
+      }
+      if (drag.touch) closeRail(1800);
+      else if (!rail.matches(":hover")) closeRail();
+    };
+    rail.addEventListener("pointerup", end);
+    rail.addEventListener("pointercancel", end);
+    document.addEventListener("pointerdown", e => { if (railMode && !rail.contains(e.target)) closeRail(); });
+    document.addEventListener("keydown", e => { if (e.key === "Escape" && railMode) closeRail(); });
   }
   function onScroll() {
     cancelAnimationFrame(railFrame);
     railFrame = requestAnimationFrame(() => {
       if ($("#thread").hidden) { $("#toBottom").hidden = true; return; }
-      const doc = document.documentElement;
+      const doc = document.documentElement, rail = $("#rail");
       const fromBottom = doc.scrollHeight - (window.scrollY + window.innerHeight);
       $("#toBottom").hidden = fromBottom < 400;
+      if (rail.hidden || !railItems.length) return;
+      railGeo.max = Math.max(1, doc.scrollHeight - window.innerHeight);
+      railGeo.full = Math.max(1, doc.scrollHeight);
+      // The band shows which part of the conversation is on screen.
+      const bandTop = (window.scrollY / railGeo.full) * railGeo.height;
+      const bandHeight = Math.max(10, (window.innerHeight / railGeo.full) * railGeo.height);
+      railThumb = bandTop + bandHeight / 2;
+      const thumb = $(".rail-thumb", rail);
+      thumb.style.top = `${bandTop}px`; thumb.style.height = `${bandHeight}px`;
       let current = 0;
-      const line = Math.min(160, window.innerHeight * 0.3);
-      railTargets.forEach((t, i) => { if (t.node.getBoundingClientRect().top <= line) current = i; });
-      if (fromBottom < 4 && railTargets.length) current = railTargets.length - 1;
-      $("#rail").querySelectorAll(".dot").forEach((d, i) => {
-        d.classList.toggle("on", i === current);
-        if (i === current) d.setAttribute("aria-current", "location"); else d.removeAttribute("aria-current");
+      railItems.forEach((item, i) => { if (item.target <= window.scrollY + 40) current = i; });
+      if (fromBottom < 4) current = railItems.length - 1;
+      railCurrent = current;
+      railItems.forEach((item, i) => {
+        item.el.classList.toggle("on", i === current);
+        if (i === current) item.el.setAttribute("aria-current", "location"); else item.el.removeAttribute("aria-current");
       });
+      if ((railDrag && railDrag.moved) || railMode === "touch") showCurrent();
+      rail.classList.add("active");
+      clearTimeout(railActiveTimer);
+      railActiveTimer = setTimeout(() => rail.classList.remove("active"), 1400);
     });
   }
   function toEnd() { window.scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"}); }
@@ -859,8 +991,9 @@
       state.sites = Number(input.value); store.set("s5.sites", input.value); syncSites();
     }));
     $("#toBottom").addEventListener("click", toEnd);
+    setupRail();
     window.addEventListener("scroll", onScroll, {passive: true});
-    window.addEventListener("resize", onScroll);
+    window.addEventListener("resize", () => { onScroll(); scheduleRail(); });
     $("#uiLang").addEventListener("change", e => { state.ui = e.target.value; store.set("s5.ui", state.ui); applyI18n(); });
     $("#libFilter").addEventListener("input", renderLibrary);
     $("#recentAll").addEventListener("click", openLibrary);
