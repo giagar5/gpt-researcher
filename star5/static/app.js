@@ -291,7 +291,7 @@
       b.dataset.i = String(i); b.style.top = `${item.y}px`;
       b.setAttribute("aria-label", railText(item.label, 140));
       b.addEventListener("click", e => { if (e.detail === 0) jumpTo(item); });   // keyboard only; pointers are handled by the rail
-      if (item.q && item.y - lastLabel >= LABEL_GAP) { b.append(el("span", "lbl", railText(item.label, 48))); lastLabel = item.y; }
+      if (item.q && item.y - lastLabel >= LABEL_GAP) { b.append(el("span", "lbl", railText(item.label, 70))); lastLabel = item.y; }
       item.el = b;
       return item;
     });
@@ -316,11 +316,12 @@
     const focus = $("#rail .rail-focus");
     if (!item) { focus.hidden = true; railItems.forEach(it => it.el.classList.remove("covered")); return; }
     const question = item.q ? item : railItems.find(it => it.q && it.qi === item.qi);
-    focus.replaceChildren(el("b", "", railText(question ? question.label : item.label, 72)));
-    if (!item.q) focus.append(el("span", "", `› ${railText(item.label, 72)}`));
-    focus.style.top = `${Math.max(14, Math.min(railGeo.height - 14, y))}px`;
+    focus.replaceChildren(el("b", "", railText(question ? question.label : item.label, 400)));
+    if (!item.q) focus.append(el("span", "", `› ${railText(item.label, 200)}`));
     focus.hidden = false;
-    railItems.forEach(it => it.el.classList.toggle("covered", Math.abs(it.y - y) < 20));
+    const half = focus.offsetHeight / 2;
+    focus.style.top = `${Math.max(half - 6, Math.min(railGeo.height - half + 6, y))}px`;
+    railItems.forEach(it => it.el.classList.toggle("covered", Math.abs(it.y - y) < Math.max(20, half)));
   }
   // While scrubbing the preview follows the band; otherwise it sits next to the current dot.
   const showCurrent = () => {

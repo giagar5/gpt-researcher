@@ -298,7 +298,7 @@ button{cursor:pointer}
 .rail .dot.ds.on::before{width:7px;height:7px}
 .rail .dot.hot::before{opacity:1;background:var(--cp-text);transform:translate(-50%,-50%) scale(1.7)}
 .rail .lbl{position:absolute;right:32px;top:50%;transform:translate(8px,-50%);opacity:0;pointer-events:none;
-  white-space:nowrap;max-width:min(300px,64vw);overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:600;
+  white-space:nowrap;max-width:min(440px,70vw);overflow:hidden;text-overflow:ellipsis;font-size:12px;font-weight:600;
   line-height:18px;padding:1px 10px;border-radius:999px;background:var(--cp-surface);color:var(--cp-text-soft);
   box-shadow:var(--card);transition:opacity .1s,transform .1s}
 .rail.open .lbl{opacity:1;transform:translate(0,-50%);pointer-events:auto}
@@ -308,12 +308,14 @@ button{cursor:pointer}
   opacity:0;transition:opacity .2s;pointer-events:none}
 .rail.open .rail-thumb,.rail.active .rail-thumb{opacity:.28}
 .rail-focus{position:absolute;right:36px;transform:translateY(-50%);z-index:2;display:flex;flex-direction:column;
-  align-items:flex-end;gap:1px;max-width:min(380px,74vw);padding:6px 12px 5px;border-radius:12px;
+  gap:2px;width:max-content;max-width:min(480px,78vw);padding:7px 12px 6px;border-radius:12px;
   background:var(--cp-bg-elevated);border:1px solid var(--cp-border);border-bottom:2px solid #2a95b8;
   box-shadow:var(--cp-shadow);pointer-events:none}
-.rail-focus b,.rail-focus span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.rail-focus b{font-size:14px;font-weight:650;color:var(--cp-text)}
-.rail-focus span{font-size:12px;color:var(--cp-text-muted)}
+/* full text, wrapped: long questions stay readable (at most 5 lines) */
+.rail-focus b,.rail-focus span{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;
+  line-height:1.35}
+.rail-focus b{font-size:14px;font-weight:650;color:var(--cp-text);-webkit-line-clamp:5}
+.rail-focus span{font-size:12px;color:var(--cp-text-muted);-webkit-line-clamp:2}
 
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{50%{opacity:.35}}
