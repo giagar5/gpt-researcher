@@ -936,8 +936,10 @@
       return true;
     } catch (error) { if (error.message !== "expired") banner(T.genericError); return false; }
   }
+  function closeOpts(button, panel) { panel.hidden = true; button.setAttribute("aria-expanded", "false"); }
   async function submitHome(event) {
     event.preventDefault();
+    closeOpts($("#optBtn"), $("#opts"));
     const q = $("#q"), question = q.value.trim(); if (!question) return;
     if (state.homeComposer.busy()) { banner(T.waitUploads); return; }
     const button = $("#ask .send"); button.disabled = true;
@@ -951,6 +953,7 @@
   }
   async function submitFollow(event) {
     event.preventDefault();
+    closeOpts($("#fOptBtn"), $("#fopts"));
     const f = $("#fq"), question = f.value.trim(); if (!question) return;
     if (state.followComposer.busy()) { banner(T.waitUploads); return; }
     if (await ask(question, state.kind, state.kind === "research" ? state.mode : "quick", state.followComposer)) {
@@ -962,6 +965,20 @@
     t.addEventListener("input", () => autosize(t));
     t.addEventListener("keydown", e => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer:fine)").matches) { e.preventDefault(); form.requestSubmit(); }
+    });
+  }
+
+  /* ---------- installable app (PWA) ---------- */
+  function setupInstall() {
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+    const button = $("#installBtn");
+    let prompt = null;
+    window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); prompt = e; button.hidden = false; });
+    window.addEventListener("appinstalled", () => { prompt = null; button.hidden = true; });
+    button.addEventListener("click", async () => {
+      if (!prompt) return;
+      button.hidden = true; prompt.prompt();
+      try { await prompt.userChoice; } finally { prompt = null; }
     });
   }
 
@@ -992,6 +1009,7 @@
       state.sites = Number(input.value); store.set("s5.sites", input.value); syncSites();
     }));
     $("#toBottom").addEventListener("click", toEnd);
+    setupInstall();
     setupRail();
     window.addEventListener("scroll", onScroll, {passive: true});
     window.addEventListener("resize", () => { onScroll(); scheduleRail(); });

@@ -35,8 +35,8 @@ MAX_ATTACHMENTS = 10
 LOG = logging.getLogger("star5")
 STATIC = Path(__file__).resolve().parent / "static"
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
-       "font-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; "
-       "object-src 'none'")
+       "font-src 'self'; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; base-uri 'none'; "
+       "form-action 'self'; frame-ancestors 'none'; object-src 'none'")
 NO_STORE = {"Cache-Control": "no-store"}
 OUTPUTS = Path("outputs").resolve()
 
@@ -341,6 +341,12 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
 
     app.router.routes.insert(0, APIRoute("/", index, methods=["GET"], include_in_schema=False))
 
+    # The service worker must be served from the root to control the whole app.
+    async def service_worker():
+        return FileResponse(STATIC / "sw.js", media_type="text/javascript", headers=NO_STORE)
+
+    app.router.routes.insert(0, APIRoute("/sw.js", service_worker, methods=["GET"], include_in_schema=False))
+
     def keep(route):
         # FastAPI >= 0.16x adds one opaque _IncludedRouter per include_router(): match by identity.
         if any(route is r for r in own):
@@ -348,6 +354,8 @@ def install(app: FastAPI, *, data_dir=None, base_config=None, research_fn=resear
         path = getattr(route, "path", "")
         if path == "/":
             return getattr(route, "endpoint", None) is index
+        if path == "/sw.js":
+            return getattr(route, "endpoint", None) is service_worker
         if isinstance(route, Mount):
             return path in ("/s5", "/outputs")
         return False

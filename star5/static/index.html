@@ -7,6 +7,11 @@
 <title>Star5 Search</title>
 <link rel="icon" href="/s5/favicon.svg?v=4" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/s5/apple-touch-icon.png?v=4">
+<link rel="manifest" href="/s5/manifest.json">
+<meta name="theme-color" content="#f4f6ea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#221f2c" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Star5 Search">
 <link rel="stylesheet" href="/s5/app.css">
 <script src="/s5/vendor/showdown.min.js" defer></script>
 <script src="/s5/vendor/purify.min.js" defer></script>
@@ -44,6 +49,10 @@
           <option value="en">English</option>
         </select>
       </label>
+      <button type="button" class="install-btn" id="installBtn" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+        <span data-i18n="install"></span>
+      </button>
     </div>
   </aside>
   <div id="scrim" class="scrim" hidden></div>

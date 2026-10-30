@@ -54,6 +54,10 @@ button{cursor:pointer}
 .side-foot{display:flex;align-items:center;gap:8px;padding:8px 4px 0;border-top:1px solid var(--cp-border)}
 .ui-lang{display:inline-flex;align-items:center;gap:6px;color:var(--cp-text-muted)}
 .ui-lang select{border:0;background:transparent;font-size:14px;padding:4px 0}
+.install-btn{margin-left:auto;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--cp-border);
+  border-radius:999px;background:transparent;color:var(--cp-text);font-size:13px;padding:5px 12px;cursor:pointer}
+.install-btn svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.install-btn[hidden]{display:none}
 .main{min-width:0;display:flex;flex-direction:column}
 .icon-btn{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:var(--rs);
   border:0;background:transparent;color:var(--cp-text)}

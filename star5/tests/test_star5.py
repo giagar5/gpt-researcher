@@ -868,6 +868,23 @@ class ApiTests(Star5Case):
         for asset in ("/s5/app.js", "/s5/vendor/showdown.min.js", "/s5/vendor/purify.min.js"):
             self.assertEqual(self.client.get(asset).status_code, 200, asset)
 
+    def test_app_is_an_installable_pwa(self):
+        csp = self.client.get("/").headers["content-security-policy"]
+        self.assertIn("manifest-src 'self'", csp)
+        self.assertIn("worker-src 'self'", csp)
+        worker = self.client.get("/sw.js")
+        self.assertEqual(worker.status_code, 200)
+        self.assertIn("javascript", worker.headers["content-type"])
+        self.assertIn("no-store", worker.headers["cache-control"])
+        manifest = self.client.get("/s5/manifest.json").json()
+        self.assertEqual((manifest["start_url"], manifest["scope"], manifest["display"]), ("/", "/", "standalone"))
+        sizes = {(i["sizes"], i["purpose"]) for i in manifest["icons"]}
+        self.assertTrue({("192x192", "any"), ("512x512", "any"), ("512x512", "maskable")} <= sizes)
+        for icon in manifest["icons"]:
+            self.assertEqual(self.client.get(icon["src"]).status_code, 200, icon["src"])
+        paths = [getattr(r, "path", "") for r in self.app.router.routes]
+        self.assertEqual(paths.count("/sw.js"), 1)
+
     def test_old_ui_and_its_api_are_gone_after_startup(self):
         for path in ("/site/index.html", "/static/index.html", "/api/reports", "/ws", "/docs", "/openapi.json"):
             self.assertEqual(self.client.get(path).status_code, 404, path)
