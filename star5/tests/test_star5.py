@@ -869,9 +869,17 @@ class ApiTests(Star5Case):
             self.assertEqual(self.client.get(asset).status_code, 200, asset)
 
     def test_app_is_an_installable_pwa(self):
-        csp = self.client.get("/").headers["content-security-policy"]
+        index = self.client.get("/")
+        csp = index.headers["content-security-policy"]
         self.assertIn("manifest-src 'self'", csp)
         self.assertIn("worker-src 'self'", csp)
+        self.assertIn('/s5/icon-192.png?v=6" type="image/png"', index.text)
+        self.assertEqual(index.text.count('src="/s5/icon-192.png?v=6"'), 2)
+        self.assertIn('/s5/apple-touch-icon.png?v=6', index.text)
+        apple_icon = self.client.get("/s5/apple-touch-icon.png")
+        self.assertEqual(apple_icon.status_code, 200)
+        self.assertEqual(int.from_bytes(apple_icon.content[16:20], "big"), 180)
+        self.assertEqual(int.from_bytes(apple_icon.content[20:24], "big"), 180)
         worker = self.client.get("/sw.js")
         self.assertEqual(worker.status_code, 200)
         self.assertIn("javascript", worker.headers["content-type"])
@@ -881,7 +889,14 @@ class ApiTests(Star5Case):
         sizes = {(i["sizes"], i["purpose"]) for i in manifest["icons"]}
         self.assertTrue({("192x192", "any"), ("512x512", "any"), ("512x512", "maskable")} <= sizes)
         for icon in manifest["icons"]:
-            self.assertEqual(self.client.get(icon["src"]).status_code, 200, icon["src"])
+            response = self.client.get(icon["src"])
+            self.assertEqual(response.status_code, 200, icon["src"])
+            self.assertEqual(response.content[:8], b"\x89PNG\r\n\x1a\n", icon["src"])
+            width = int.from_bytes(response.content[16:20], "big")
+            height = int.from_bytes(response.content[20:24], "big")
+            expected = tuple(map(int, icon["sizes"].split("x")))
+            self.assertEqual((width, height), expected, icon["src"])
+        self.assertFalse(any(icon["type"] == "image/svg+xml" for icon in manifest["icons"]))
         paths = [getattr(r, "path", "") for r in self.app.router.routes]
         self.assertEqual(paths.count("/sw.js"), 1)
 
